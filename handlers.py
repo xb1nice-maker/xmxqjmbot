@@ -97,6 +97,10 @@ def get_admin_keyboard():
 # -------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ 处理 /start 指令 """
+    # 🛡️ 核心修复：非私聊直接忽略，绝不在群里乱发言
+    if update.effective_chat.type != "private":
+        return
+
     user = update.effective_user
     if not user:
         return
@@ -136,6 +140,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != "private":
+        return
+        
     user_id = update.effective_user.id
     current_role = get_user_role(user_id)
     
@@ -155,6 +162,10 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 用户 ID 格式不正确，必须是纯数字。")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🛡️ 核心修复：非私聊直接忽略，绝不在群里乱发言
+    if update.effective_chat.type != "private":
+        return
+
     user = update.effective_user
     if not user:
         return
@@ -357,12 +368,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 📥 存储逻辑（处理文件转发与入库）
 # -------------------------------------------------------------
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🛡️ 核心修复：群聊中的文件直接忽略，绝不在群里响应或乱说话
+    if update.effective_chat.type != "private":
+        return
+
     user = update.effective_user
     if not user:
         return
     user_id = user.id
     role = get_user_role(user_id)
-    print(f"👉 收到文件上传请求 - UserID: {user_id}, 数据库角色: {role}, 是否判定为管理员: {is_admin_user(user_id, role)}")
 
     if role == ROLE_BLACKLIST or not await check_user_membership(update, context):
         return
