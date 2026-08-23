@@ -426,7 +426,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["pack_files"] = []
             
         current_files = context.user_data["pack_files"]
-        MAX_PACK_FILES = 50
+        MAX_PACK_FILES = 1500
         if len(current_files) >= MAX_PACK_FILES:
             await msg.reply_text(f"⚠️ 已达到单次打包上限 ({MAX_PACK_FILES} 个)！请点击【✅ 完成打包】。")
             return
