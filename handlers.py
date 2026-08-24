@@ -609,7 +609,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                             if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id)
                             elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id)
                             elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                            elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+                            elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, video=f_id)
                             else: await context.bot.send_document(chat_id=chat_id, document=f_id)
                         except Exception as item_err:
                             logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
