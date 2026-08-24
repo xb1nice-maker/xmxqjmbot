@@ -341,7 +341,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pack = db.get_pack_by_code(text)
         if pack:
             if not is_admin_user(user_id, role):
-                is_cd, remaining_sec = db.check_code_cooldown(text, hours=2)
+                # 💡 改为传入 user_id 的用户独立冷却检查
+                is_cd, remaining_sec = db.check_user_code_cooldown(user_id, text, hours=2)
                 if is_cd:
                     mins = math.ceil(remaining_sec / 60)
                     await update.message.reply_text(
@@ -358,7 +359,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
-            await send_batch_files(update, context, code=text, page=1)
+            # 💡 传递 user_id 过去
+            await send_batch_files(update, context, code=text, page=1, user_id=user_id)
         else:
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
@@ -408,7 +410,6 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 未能识别到有效的文件内容。")
         return
 
-    # 直接将 file_id 和类型组装为文件项（不再转发到频道）
     file_item = {
         "type": file_type, 
         "file_id": file_id
@@ -557,7 +558,7 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
 # -------------------------------------------------------------
 # 📤 提取核心逻辑（直接使用存下来的 file_id 发送）
 # -------------------------------------------------------------
-async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1):
+async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None):
     chat_id = update.effective_chat.id
     pack = db.get_pack_by_code(code)
 
@@ -566,6 +567,10 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         if update.callback_query: await update.callback_query.message.reply_text(text)
         else: await update.message.reply_text(text)
         return
+
+    # 如果没传 user_id，尝试从 update 中获取
+    if not user_id and update.effective_user:
+        user_id = update.effective_user.id
 
     file_items = pack["files"]
     total_files = len(file_items)
@@ -578,7 +583,8 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     chunk = file_items[start_idx:end_idx]
 
-    if page == 1:
+    if page == 1 and user_id:
+        # 💡 使用用户独立的更新提取记录函数
         db.update_user_code_extraction(user_id, code)
 
     if page > 1:
@@ -725,7 +731,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = data.split("_")[1]
         
         if not is_admin:
-            is_cd, remaining_sec = db.check_code_cooldown(code, hours=2)
+            # 💡 按钮回调中也改为用户独立冷却检查
+            is_cd, remaining_sec = db.check_user_code_cooldown(user_id, code, hours=2)
             if is_cd:
                 mins = math.ceil(remaining_sec / 60)
                 await query.message.reply_text(
@@ -736,7 +743,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        await send_batch_files(update, context, code=code, page=1)
+        # 💡 传递 user_id 过去
+        await send_batch_files(update, context, code=code, page=1, user_id=user_id)
 
     elif data.startswith("sendpage_"):
         _, code, page_str = data.split("_")
@@ -744,7 +752,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await send_batch_files(update, context, code=code, page=int(page_str))
+        # 💡 翻页时同样传递 user_id
+        await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id)
 
     elif data == "cancel_extract":
         await query.message.edit_text("❌ 已结束本次文件提取。")
