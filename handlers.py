@@ -340,7 +340,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
-            await send_batch_files(update, context, code=text, page=1, user_id=user_id)
+            await send_batch_files(update, context, code=text, page=1, user_id=user_id, screen_group=0)
         else:
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
@@ -521,9 +521,9 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# 📤 提取核心逻辑（每 10 个为一组，支持最大每页 15 个数字按钮矩阵跳页）
+# 📤 提取核心逻辑（支持 15 个数字区块翻页矩阵）
 # -------------------------------------------------------------
-async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None):
+async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None, screen_group: int = None):
     chat_id = update.effective_chat.id
     pack = db.get_pack_by_code(code)
 
@@ -538,19 +538,28 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     file_items = pack["files"]
     total_files = len(file_items)
-    chunk_size = 10  # 💡 强制每10个文件为一组
+    chunk_size = 10  # 每 10 个文件为一组
     total_pages = math.ceil(total_files / chunk_size)
 
     page = max(1, min(page, total_pages))
+    
+    # 自动计算当前页所在的数字区块（每 15 个数字为一组）
+    max_buttons_per_screen = 15
+    total_screen_groups = math.ceil(total_pages / max_buttons_per_screen)
+    
+    if screen_group is None:
+        screen_group = (page - 1) // max_buttons_per_screen
+    screen_group = max(0, min(screen_group, total_screen_groups - 1))
+
     start_idx = (page - 1) * chunk_size
     end_idx = min(start_idx + chunk_size, total_files)
-
     chunk = file_items[start_idx:end_idx]
 
-    if page == 1 and user_id:
+    if page == 1 and user_id and not update.callback_query:
         db.update_user_code_extraction(user_id, code)
 
-    if page > 1:
+    # 发送 10 秒缓冲提示
+    if update.callback_query:
         waiting_msg = await context.bot.send_message(
             chat_id=chat_id, 
             text=f"⏳ **正在准备第 {page}/{total_pages} 组文件，请等待 10 秒缓冲...**", 
@@ -610,44 +619,37 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     warning_suffix = f"\n⚠️ *(已检测TG标记问题文件已跳过 {failed_count} 个)*" if failed_count > 0 else ""
 
-    # 🎛️ 构建数字按钮矩阵（最多 15 个数字按钮为一个界面，每行 5 个）
+    # 🎛️ 构建数字按钮矩阵（每 15 个数字一组，每行 5 个）
     buttons = []
-    max_buttons_per_screen = 15
-    
-    # 动态计算当前 15 个数字按钮展示的页码范围
-    current_screen_group = (page - 1) // max_buttons_per_screen
-    start_num = current_screen_group * max_buttons_per_screen + 1
+    start_num = screen_group * max_buttons_per_screen + 1
     end_num = min(start_num + max_buttons_per_screen - 1, total_pages)
     
     current_row = []
     for p_num in range(start_num, end_num + 1):
-        # 当前页加上中括号高亮
+        # 当前查看的页码加方括号高亮
         btn_text = f"[{p_num}]" if p_num == page else str(p_num)
-        current_row.append(InlineKeyboardButton(btn_text, callback_data=f"sendpage_{code}_{p_num}"))
+        current_row.append(InlineKeyboardButton(btn_text, callback_data=f"sendpage_{code}_{p_num}_{screen_group}"))
         if len(current_row) == 5:
             buttons.append(current_row)
             current_row = []
     if current_row:
         buttons.append(current_row)
 
-    # 底部控制行：上一页 / 下一页
-    control_row = []
-    if page > 1:
-        control_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"sendpage_{code}_{page - 1}"))
-    if page < total_pages:
-        control_row.append(InlineKeyboardButton("下一页 ➡️ [需等10秒]", callback_data=f"sendpage_{code}_{page + 1}"))
-    if control_row:
-        buttons.append(control_row)
+    # 🔀 大区块数字翻页（上一组 15 个数字 / 下一组 15 个数字）
+    block_nav_row = []
+    if screen_group > 0:
+        block_nav_row.append(InlineKeyboardButton("⬅️ 上一组数字", callback_data=f"block_{code}_{screen_group - 1}"))
+    if screen_group < total_screen_groups - 1:
+        block_nav_row.append(InlineKeyboardButton("下一组数字 ➡️", callback_data=f"block_{code}_{screen_group + 1}"))
+    if block_nav_row:
+        buttons.append(block_nav_row)
 
-    if page >= total_pages:
-        buttons.append([InlineKeyboardButton("✅ 已全部提取完毕", callback_data="cancel_extract")])
-    else:
-        buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
+    buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
 
     markup = InlineKeyboardMarkup(buttons)
     status_msg = (
         f"📦 **提取码：** `{code}`\n"
-        f"📊 **当前进度：** 第 `{page}/{total_pages}` 组 (每组10个)\n"
+        f"📊 **当前组进度：** 第 `{page}/{total_pages}` 页 (每组10个)\n"
         f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个文件（共 {total_files} 个）"
         f"{warning_suffix}"
     )
@@ -673,6 +675,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_admin = is_admin_user(user_id, role)
 
+    # 点击具体数字页时触发 10 秒冷却限制检查
     if data.startswith("sendpage_") and not is_admin:
         now = time.time()
         last_click = context.user_data.get("last_page_click_time", 0)
@@ -712,15 +715,66 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mins = math.ceil(remaining_sec / 60)
                 await query.message.reply_text(f"⏳ **提取码冷却中**\n\n该提取码 `{code}` 在 2 小时内已被提取过！\n请等待 **{mins} 分钟** 后再试。", parse_mode="Markdown")
                 return
-        await send_batch_files(update, context, code=code, page=1, user_id=user_id)
+        await send_batch_files(update, context, code=code, page=1, user_id=user_id, screen_group=0)
 
     elif data.startswith("sendpage_"):
-        _, code, page_str = data.split("_")
+        _, code, page_str, screen_group_str = data.split("_")
         try:
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id)
+        await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id, screen_group=int(screen_group_str))
+
+    elif data.startswith("block_"):
+        # 仅切换大数字区块（如 1~15 翻到 16~30），不发送文件
+        _, code, screen_group_str = data.split("_")
+        screen_group = int(screen_group_str)
+        
+        pack = db.get_pack_by_code(code)
+        if not pack:
+            await query.message.edit_text("❌ 提取码已失效或被删除。")
+            return
+            
+        total_files = len(pack["files"])
+        total_pages = math.ceil(total_files / 10)
+        max_buttons_per_screen = 15
+        total_screen_groups = math.ceil(total_pages / max_buttons_per_screen)
+        screen_group = max(0, min(screen_group, total_screen_groups - 1))
+        
+        # 重新渲染当前区块的按钮面板
+        start_num = screen_group * max_buttons_per_screen + 1
+        end_num = min(start_num + max_buttons_per_screen - 1, total_pages)
+        
+        buttons = []
+        current_row = []
+        for p_num in range(start_num, end_num + 1):
+            current_row.append(InlineKeyboardButton(str(p_num), callback_data=f"sendpage_{code}_{p_num}_{screen_group}"))
+            if len(current_row) == 5:
+                buttons.append(current_row)
+                current_row = []
+        if current_row:
+            buttons.append(current_row)
+
+        block_nav_row = []
+        if screen_group > 0:
+            block_nav_row.append(InlineKeyboardButton("⬅️ 上一组数字", callback_data=f"block_{code}_{screen_group - 1}"))
+        if screen_group < total_screen_groups - 1:
+            block_nav_row.append(InlineKeyboardButton("下一组数字 ➡️", callback_data=f"block_{code}_{screen_group + 1}"))
+        if block_nav_row:
+            buttons.append(block_nav_row)
+
+        buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
+        
+        try:
+            await query.message.edit_text(
+                f"📦 **提取码：** `{code}`\n"
+                f"🎛️ 当前数字面板已切换为：第 `{start_num} ~ {end_num}` 页\n"
+                f"💡 请直接点击下方数字按钮查看对应页码：",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
     elif data == "cancel_extract":
         await query.message.edit_text("❌ 已结束本次文件提取。")
