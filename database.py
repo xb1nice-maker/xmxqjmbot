@@ -56,7 +56,7 @@ def init_db():
                 );
             """)
 
-            # 文件包主表
+            # 文件包主表（移除了全局的 last_extracted_at，改用用户独立提取记录表）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS file_bundles (
                     code VARCHAR(50) PRIMARY KEY,
@@ -64,8 +64,17 @@ def init_db():
                     file_id TEXT,
                     files TEXT,
                     file_count INT DEFAULT 1,
-                    last_extracted_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # 💡 新增：用户独立提取记录表（用于实现每个用户独立的 2 小时冷却）
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_extractions (
+                    user_id BIGINT,
+                    code VARCHAR(50),
+                    last_extracted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, code)
                 );
             """)
 
@@ -84,19 +93,21 @@ def init_db():
         release_connection(conn)
 
 # -------------------------------------------------------------
-# ⏱️ 提取码 CD 判定逻辑
+# ⏱️ 用户独立提取码 CD 判定逻辑
 # -------------------------------------------------------------
-def check_code_cooldown(code: str, hours: int = 2):
+def check_user_code_cooldown(user_id: int, code: str, hours: int = 2):
+    """检查特定用户对特定提取码的独立冷却状态"""
     conn = get_connection()
     try:
+        user_id = int(user_id)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT 
                     last_extracted_at,
                     EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_extracted_at)) AS elapsed
-                FROM file_bundles 
-                WHERE code = %s;
-            """, (code,))
+                FROM user_extractions 
+                WHERE user_id = %s AND code = %s;
+            """, (user_id, code))
             row = cur.fetchone()
             
             if not row or not row[0]:
@@ -110,23 +121,26 @@ def check_code_cooldown(code: str, hours: int = 2):
                 return True, remaining
             return False, 0
     except Exception as e:
-        logger.error(f"检查提取码 CD 失败: {e}")
+        logger.error(f"检查用户提取码 CD 失败: {e}")
         return False, 0
     finally:
         release_connection(conn)
 
-def update_code_last_extracted(code: str):
+def update_user_code_extraction(user_id: int, code: str):
+    """更新特定用户最后提取该码的时间"""
     conn = get_connection()
     try:
+        user_id = int(user_id)
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE file_bundles 
-                SET last_extracted_at = CURRENT_TIMESTAMP 
-                WHERE code = %s;
-            """, (code,))
+                INSERT INTO user_extractions (user_id, code, last_extracted_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id, code) 
+                DO UPDATE SET last_extracted_at = CURRENT_TIMESTAMP;
+            """, (user_id, code))
             conn.commit()
     except Exception as e:
-        logger.error(f"更新提取码时间失败: {e}")
+        logger.error(f"更新用户提取时间失败: {e}")
         conn.rollback()
     finally:
         release_connection(conn)
@@ -221,6 +235,7 @@ def get_all_user_ids():
         return []
     finally:
         release_connection(conn)
+
 def set_user_role(user_id: int, role: str):
     """设置用户的角色（如 admin, user, blacklist）"""
     conn = get_connection()
@@ -239,6 +254,7 @@ def set_user_role(user_id: int, role: str):
         conn.rollback()
     finally:
         release_connection(conn)
+
 # -------------------------------------------------------------
 # 📦 文件包与提取码管理
 # -------------------------------------------------------------
@@ -325,8 +341,7 @@ def get_pack_by_code(code: str):
                 "code": row["code"],
                 "owner_id": row.get("user_id"),
                 "count": len(files_data),
-                "files": files_data,
-                "last_extracted_at": row.get("last_extracted_at")
+                "files": files_data
             }
     except Exception as e:
         logger.error(f"读取提取码失败: {e}")
@@ -370,6 +385,7 @@ def delete_pack_by_code(code: str):
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM file_bundles WHERE code = %s;", (code,))
+            cur.execute("DELETE FROM user_extractions WHERE code = %s;", (code,))
             conn.commit()
     except Exception as e:
         logger.error(f"删除提取码失败: {e}")
