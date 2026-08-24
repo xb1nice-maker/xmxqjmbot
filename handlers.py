@@ -10,7 +10,7 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 from permissions import get_user_role, ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_BLACKLIST
-from config import REQUIRED_GROUP_ID, STORAGE_CHANNEL_ID, ADMIN_ID
+from config import REQUIRED_GROUP_ID, ADMIN_ID
 import database as db
 
 logging.basicConfig(level=logging.INFO)
@@ -97,7 +97,6 @@ def get_admin_keyboard():
 # -------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ 处理 /start 指令 """
-    # 🛡️ 核心修复：非私聊直接忽略，绝不在群里乱发言
     if update.effective_chat.type != "private":
         return
 
@@ -162,7 +161,6 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 用户 ID 格式不正确，必须是纯数字。")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 🛡️ 核心修复：非私聊直接忽略，绝不在群里乱发言
     if update.effective_chat.type != "private":
         return
 
@@ -365,10 +363,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
 # -------------------------------------------------------------
-# 📥 存储逻辑（处理文件转发与入库）
+# 📥 存储逻辑（直接接收文件并缓存，无频道中转）
 # -------------------------------------------------------------
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 🛡️ 核心修复：群聊中的文件直接忽略，绝不在群里响应或乱说话
     if update.effective_chat.type != "private":
         return
 
@@ -407,16 +404,12 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_type = "document"
         file_id = msg.document.file_id
 
-    try:
-        forwarded = await msg.forward(chat_id=STORAGE_CHANNEL_ID)
-        channel_msg_id = forwarded.message_id
-    except Exception as e:
-        logger.error(f"❌ 转发至存储频道失败: {e}")
-        await update.message.reply_text(f"⚠️ 存储失败！请确保机器人已加入频道 `{STORAGE_CHANNEL_ID}` 且拥有管理员权限！\n错误: `{e}`", parse_mode="Markdown")
+    if not file_id:
+        await update.message.reply_text("⚠️ 未能识别到有效的文件内容。")
         return
 
+    # 直接将 file_id 和类型组装为文件项（不再转发到频道）
     file_item = {
-        "msg_id": channel_msg_id, 
         "type": file_type, 
         "file_id": file_id
     }
@@ -436,7 +429,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         progress_msg_id = context.user_data.get("packing_progress_msg_id")
         status_text = (
-            f"⏳ **正在上传接收中...**\n"
+            f"⏳ **正在缓存接收中...**\n"
             f"📦 当前已缓存：`{current_count}` 个文件\n\n"
             f"💡 发送完毕后，请点击下方【✅ 完成打包并生成提取码】。"
         )
@@ -562,7 +555,7 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# 📤 提取核心逻辑
+# 📤 提取核心逻辑（直接使用存下来的 file_id 发送）
 # -------------------------------------------------------------
 async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1):
     chat_id = update.effective_chat.id
@@ -601,13 +594,21 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             pass
 
     try:
-        if len(chunk) == 1 or not chunk[0].get("file_id"):
-            for item in chunk:
-                await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=STORAGE_CHANNEL_ID,
-                    message_id=item["msg_id"]
-                )
+        if len(chunk) == 1:
+            item = chunk[0]
+            f_id = item.get("file_id")
+            f_type = item.get("type", "document")
+            
+            if f_type == "photo":
+                await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+            elif f_type == "video":
+                await context.bot.send_video(chat_id=chat_id, video=f_id)
+            elif f_type == "audio":
+                await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+            elif f_type == "voice":
+                await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+            else:
+                await context.bot.send_document(chat_id=chat_id, document=f_id)
         else:
             media_group = []
             for item in chunk:
@@ -630,20 +631,18 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                 try:
                     await context.bot.send_media_group(chat_id=chat_id, media=media_group)
                 except Exception as album_err:
-                    logger.warning(f"⚠️ send_media_group 聚合发送失败: {album_err}，降级为逐个 copy...")
+                    logger.warning(f"⚠️ send_media_group 聚合发送失败: {album_err}，降级为逐个发送...")
                     for item in chunk:
-                        await context.bot.copy_message(
-                            chat_id=chat_id,
-                            from_chat_id=STORAGE_CHANNEL_ID,
-                            message_id=item["msg_id"]
-                        )
-            else:
-                for item in chunk:
-                    await context.bot.copy_message(
-                        chat_id=chat_id,
-                        from_chat_id=STORAGE_CHANNEL_ID,
-                        message_id=item["msg_id"]
-                    )
+                        f_id = item.get("file_id")
+                        f_type = item.get("type", "document")
+                        if f_type == "photo":
+                            await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+                        elif f_type == "video":
+                            await context.bot.send_video(chat_id=chat_id, video=f_id)
+                        elif f_type == "audio":
+                            await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+                        else:
+                            await context.bot.send_document(chat_id=chat_id, document=f_id)
 
     except Exception as e:
         logger.error(f"❌ 提取推送文件失败: {e}")
@@ -711,37 +710,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("del_"):
         _, code, current_page = data.split("_")
-        
-        pack = db.get_pack_by_code(code)
-        if pack:
-            for item in pack.get("files", []):
-                msg_id = item.get("msg_id")
-                if msg_id:
-                    try:
-                        await context.bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=msg_id)
-                    except Exception as e:
-                        logger.warning(f"⚠️ 删除频道消息失败 [MsgID: {msg_id}]: {e}")
-
         db.delete_pack_by_code(code)
-        await query.message.reply_text(f"✅ 提取码 `{code}` 及私密频道里的源文件已同步删除！", parse_mode="Markdown")
+        await query.message.reply_text(f"✅ 提取码 `{code}` 已成功删除！", parse_mode="Markdown")
         await render_my_files_page(update, context, user_id=user_id, page=int(current_page))
 
     elif data.startswith("adm_del_"):
         if is_admin:
             _, _, code, current_page = data.split("_")
-            
-            pack = db.get_pack_by_code(code)
-            if pack:
-                for item in pack.get("files", []):
-                    msg_id = item.get("msg_id")
-                    if msg_id:
-                        try:
-                            await context.bot.delete_message(chat_id=STORAGE_CHANNEL_ID, message_id=msg_id)
-                        except Exception as e:
-                            logger.warning(f"⚠️ 删除频道消息失败 [MsgID: {msg_id}]: {e}")
-
             db.delete_pack_by_code(code)
-            await query.message.reply_text(f"👑 **管理员删码：** 提取码 `{code}` 及私密频道中的源文件已强行清空！", parse_mode="Markdown")
+            await query.message.reply_text(f"👑 **管理员删码：** 提取码 `{code}` 已强行清空！", parse_mode="Markdown")
             await render_admin_global_packs_page(update, context, page=int(current_page))
 
     elif data.startswith("get_"):
