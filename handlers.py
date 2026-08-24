@@ -136,6 +136,29 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ 处理 /addadmin 指令（修复 bot.py 导入报错） """
+    if update.effective_chat.type != "private":
+        return
+        
+    user_id = update.effective_user.id
+    current_role = get_user_role(user_id)
+    
+    if not is_admin_user(user_id, current_role):
+        await update.message.reply_text("❌ 您没有权限执行此操作。")
+        return
+        
+    if not context.args:
+        await update.message.reply_text("⚠️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_user_id = int(context.args[0])
+        db.set_user_role(target_user_id, 'admin')
+        await update.message.reply_text(f"✅ 成功将用户 `{target_user_id}` 提升为**管理员**！", parse_mode="Markdown")
+    except ValueError:
+        await update.message.reply_text("❌ 用户 ID 格式不正确，必须是纯数字。")
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -623,7 +646,8 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     except Exception as e:
         logger.error(f"❌ 提取推送批次主逻辑异常: {e}")
 
-    warning_suffix = f"\n⚠️ *(其中有 {failed_count} 个文件因长期未调用已失效被自动跳过)*" if failed_count > 0 else ""
+    # 💡 修改后的提示词条
+    warning_suffix = f"\n⚠️ *(已检测TG标记问题文件已跳过 {failed_count} 个)*" if failed_count > 0 else ""
 
     # 🎛️ 构建内联键盘（加入自由跳页按钮）
     buttons = []
