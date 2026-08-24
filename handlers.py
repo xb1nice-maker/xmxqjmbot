@@ -34,7 +34,6 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = user.id
     role = get_user_role(user_id)
     
-    # 管理员豁免加群限制
     if is_admin_user(user_id, role):
         return True
 
@@ -96,7 +95,6 @@ def get_admin_keyboard():
 # 🚀 指令与文本处理
 # -------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ 处理 /start 指令 """
     if update.effective_chat.type != "private":
         return
 
@@ -138,28 +136,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-        
-    user_id = update.effective_user.id
-    current_role = get_user_role(user_id)
-    
-    if not is_admin_user(user_id, current_role):
-        await update.message.reply_text("❌ 您没有权限执行此操作。")
-        return
-        
-    if not context.args:
-        await update.message.reply_text("⚠️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
-        return
-        
-    try:
-        target_user_id = int(context.args[0])
-        db.set_user_role(target_user_id, 'admin')
-        await update.message.reply_text(f"✅ 成功将用户 `{target_user_id}` 提升为**管理员**！", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ 用户 ID 格式不正确，必须是纯数字。")
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -182,16 +158,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("admin_state")
 
+    # 🎯 处理自由跳页输入及 5 秒冷却限制
+    if context.user_data.get("awaiting_extract_jump"):
+        now = time.time()
+        last_jump = context.user_data.get("last_jump_action_time", 0)
+        if now - last_jump < 5:
+            remaining = int(5 - (now - last_jump))
+            await update.message.reply_text(f"⏳ 操作过于频繁，请等待 {remaining} 秒后再试！")
+            return
+            
+        context.user_data["last_jump_action_time"] = now
+        context.user_data["awaiting_extract_jump"] = False
+        
+        if text.isdigit():
+            target_page = int(text)
+            code = context.user_data.get("active_extract_code")
+            total_p = context.user_data.get("active_total_pages", 1)
+            
+            if code and 1 <= target_page <= total_p:
+                await update.message.reply_text(f"🚀 正在为您跳转到第 `{target_page}` 组...", parse_mode="Markdown")
+                await send_batch_files(update, context, code=code, page=target_page, user_id=user_id)
+            else:
+                await update.message.reply_text(f"⚠️ 页码无效！请输入介于 `1` 到 `{total_p}` 之间的数字。", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ 输入无效，页码必须为纯数字。")
+        return
+
     if text == "➕ 添加管理员":
         if not is_admin_user(user_id, role):
             await update.message.reply_text("❌ 您没有权限执行此操作。")
             return
         context.user_data["admin_state"] = "awaiting_add_admin"
-        await update.message.reply_text(
-            "➕ **添加管理员指引**\n\n"
-            "请直接回复你想添加为管理员的**用户 ID**（纯数字）：",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("➕ **添加管理员指引**\n\n请直接回复你想添加为管理员的**用户 ID**（纯数字）：", parse_mode="Markdown")
         return
 
     if state == "awaiting_add_admin":
@@ -242,7 +240,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📦 **已进入多文件打包模式！**\n\n"
             f"现在你可以批量发送文件/图片/视频。\n"
-            f"我会在收到文件时实时给你提示更新进度！\n"
+            f"我会在收到文件时实时提示更新进度！\n"
             f"全部发送完毕后，请点击下方：\n"
             f"👇 **【✅ 完成打包并生成提取码】**",
             reply_markup=get_packing_keyboard(),
@@ -261,8 +259,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         code = db.save_user_pack(user_id, files)
-        logger.info(f"✅ 多文件打包入库成功 [User: {user_id}]: 表情码={code}, 文件数={len(files)}")
-
         context.user_data["packing_mode"] = False
         context.user_data["pack_files"] = []
         context.user_data["packing_progress_msg_id"] = None
@@ -294,11 +290,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "⚙️ 管理员功能":
         if is_admin_user(user_id, role):
-            await update.message.reply_text(
-                "⚙️ **已进入管理员后台面板**\n请选择你需要进行的操作：",
-                reply_markup=get_admin_keyboard(),
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("⚙️ **已进入管理员后台面板**\n请选择你需要进行的操作：", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
         else:
             await update.message.reply_text("⛔️ 权限不足，只有管理员才能访问。")
         return
@@ -363,7 +355,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
 # -------------------------------------------------------------
-# 📥 存储逻辑（直接接收文件并缓存，无频道中转）
+# 📥 存储逻辑
 # -------------------------------------------------------------
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -408,10 +400,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ 未能识别到有效的文件内容。")
         return
 
-    file_item = {
-        "type": file_type, 
-        "file_id": file_id
-    }
+    file_item = {"type": file_type, "file_id": file_id}
 
     if context.user_data.get("packing_mode"):
         if "pack_files" not in context.user_data:
@@ -435,26 +424,17 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             if progress_msg_id:
-                await context.bot.edit_message_text(
-                    chat_id=msg.chat_id,
-                    message_id=progress_msg_id,
-                    text=status_text,
-                    parse_mode="Markdown"
-                )
+                await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=progress_msg_id, text=status_text, parse_mode="Markdown")
             else:
                 sent_msg = await msg.reply_text(status_text, parse_mode="Markdown")
                 context.user_data["packing_progress_msg_id"] = sent_msg.message_id
-        except Exception as e:
-            logger.warning(f"更新上传提示失败，重新发送: {e}")
+        except Exception:
             sent_msg = await msg.reply_text(status_text, parse_mode="Markdown")
             context.user_data["packing_progress_msg_id"] = sent_msg.message_id
-
     else:
         status_msg = await msg.reply_text("⏳ **正在处理并生成提取码...**", parse_mode="Markdown")
         try:
             code = db.save_user_pack(user_id, [file_item])
-            logger.info(f"✅ 单文件入库成功 [User: {user_id}]: 表情码={code}")
-
             await status_msg.edit_text(
                 f"✅ **文件转存成功！**\n\n"
                 f"🎉 你的表情提取码为：\n`{code}`\n\n"
@@ -484,7 +464,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, br
 async def render_my_files_page(update, context, user_id, page=1, is_new_message=False):
     packs = db.get_user_packs(user_id)
     if not packs:
-        text = "📂 你当前还没有上传过任何文件。（如果是打包上传，请确认已点击【✅ 完成打包并生成提取码】）"
+        text = "📂 你当前还没有上传过任何文件。"
         if is_new_message: await update.message.reply_text(text)
         else: await update.callback_query.edit_message_text(text)
         return
@@ -519,7 +499,7 @@ async def render_my_files_page(update, context, user_id, page=1, is_new_message=
 async def render_admin_global_packs_page(update, context, page=1, is_new_message=False):
     all_packs = db.get_all_global_packs()
     if not all_packs:
-        text = "🗄️ 全局文件码库为空，当前没有任何用户上传文件。"
+        text = "🗄️ 全局文件码库为空。"
         if is_new_message: await update.message.reply_text(text)
         else: await update.callback_query.edit_message_text(text)
         return
@@ -536,11 +516,9 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     inline_keyboard = []
     for item in current_packs:
         owner, code, count = item["owner_id"], item["code"], item["count"]
-        msg_text += f"👤 **用户 ID:** `{owner}`\n"
-        msg_text += f"└ 提取码: `{code}` | 文件数: `{count}` 个\n\n"
-
+        msg_text += f"👤 **用户 ID:** `{owner}`\n└ 提取码: `{code}` | 文件数: `{count}` 个\n\n"
         inline_keyboard.append([
-            InlineKeyboardButton(f"📥 校验/提取 {code}", callback_data=f"get_{code}"),
+            InlineKeyboardButton(f"📥 提取 {code}", callback_data=f"get_{code}"),
             InlineKeyboardButton(f"🚫 强行删除 {code}", callback_data=f"adm_del_{code}_{page}")
         ])
 
@@ -554,7 +532,7 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# 📤 提取核心逻辑（具备自动跳过失效文件功能）
+# 📤 提取核心逻辑（严格每 10 个为一组，支持自由跳页及防刷限制）
 # -------------------------------------------------------------
 async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None):
     chat_id = update.effective_chat.id
@@ -571,7 +549,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     file_items = pack["files"]
     total_files = len(file_items)
-    chunk_size = 10
+    chunk_size = 10  # 💡 强制每10个文件为一组
     total_pages = math.ceil(total_files / chunk_size)
 
     page = max(1, min(page, total_pages))
@@ -582,6 +560,10 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     if page == 1 and user_id:
         db.update_user_code_extraction(user_id, code)
+
+    # 存入上下文供跳页使用
+    context.user_data["active_extract_code"] = code
+    context.user_data["active_total_pages"] = total_pages
 
     if page > 1:
         waiting_msg = await context.bot.send_message(
@@ -601,18 +583,12 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             item = chunk[0]
             f_id = item.get("file_id")
             f_type = item.get("type", "document")
-            
             try:
-                if f_type == "photo":
-                    await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-                elif f_type == "video":
-                    await context.bot.send_video(chat_id=chat_id, video=f_id)
-                elif f_type == "audio":
-                    await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                elif f_type == "voice":
-                    await context.bot.send_voice(chat_id=chat_id, voice=f_id)
-                else:
-                    await context.bot.send_document(chat_id=chat_id, document=f_id)
+                if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+                elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id)
+                elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+                elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+                else: await context.bot.send_document(chat_id=chat_id, document=f_id)
             except Exception as single_err:
                 logger.warning(f"⚠️ 单文件发送失败已跳过 [{f_id}]: {single_err}")
                 failed_count += 1
@@ -621,18 +597,11 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             for item in chunk:
                 f_id = item.get("file_id")
                 f_type = item.get("type", "document")
-
-                if not f_id:
-                    continue
-
-                if f_type == "photo":
-                    media_group.append(InputMediaPhoto(media=f_id))
-                elif f_type == "video":
-                    media_group.append(InputMediaVideo(media=f_id))
-                elif f_type == "audio":
-                    media_group.append(InputMediaAudio(media=f_id))
-                else:
-                    media_group.append(InputMediaDocument(media=f_id))
+                if not f_id: continue
+                if f_type == "photo": media_group.append(InputMediaPhoto(media=f_id))
+                elif f_type == "video": media_group.append(InputMediaVideo(media=f_id))
+                elif f_type == "audio": media_group.append(InputMediaAudio(media=f_id))
+                else: media_group.append(InputMediaDocument(media=f_id))
 
             if media_group:
                 try:
@@ -643,38 +612,45 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                         f_id = item.get("file_id")
                         f_type = item.get("type", "document")
                         try:
-                            if f_type == "photo":
-                                await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-                            elif f_type == "video":
-                                await context.bot.send_video(chat_id=chat_id, video=f_id)
-                            elif f_type == "audio":
-                                await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                            elif f_type == "voice":
-                                await context.bot.send_voice(chat_id=chat_id, voice=f_id)
-                            else:
-                                await context.bot.send_document(chat_id=chat_id, document=f_id)
+                            if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+                            elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id)
+                            elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+                            elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+                            else: await context.bot.send_document(chat_id=chat_id, document=f_id)
                         except Exception as item_err:
                             logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
                             failed_count += 1
-
     except Exception as e:
         logger.error(f"❌ 提取推送批次主逻辑异常: {e}")
 
     warning_suffix = f"\n⚠️ *(其中有 {failed_count} 个文件因长期未调用已失效被自动跳过)*" if failed_count > 0 else ""
 
+    # 🎛️ 构建内联键盘（加入自由跳页按钮）
     buttons = []
+    nav_row = []
+    
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("⬅️ 上一组", callback_data=f"sendpage_{code}_{page - 1}"))
+    
+    if total_pages > 1:
+        nav_row.append(InlineKeyboardButton(f"🎯 跳页 (1-{total_pages})", callback_data=f"ext_jump_{code}"))
+        
     if page < total_pages:
-        next_count = min(chunk_size, total_files - end_idx)
-        buttons.append([InlineKeyboardButton(f"▶️ 发送下一组 ({end_idx + 1}-{end_idx + next_count}) [需等10秒]", callback_data=f"sendpage_{code}_{page + 1}")])
-        buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
-    else:
+        nav_row.append(InlineKeyboardButton("▶️ 下一组 [需等10秒]", callback_data=f"sendpage_{code}_{page + 1}"))
+
+    if nav_row:
+        buttons.append(nav_row)
+
+    if page >= total_pages:
         buttons.append([InlineKeyboardButton("✅ 已全部提取完毕", callback_data="cancel_extract")])
+    else:
+        buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
 
     markup = InlineKeyboardMarkup(buttons)
     status_msg = (
         f"📦 **提取码：** `{code}`\n"
-        f"📊 **当前进度：** 已发送第 `{page}/{total_pages}` 组\n"
-        f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个（共 {total_files} 个文件）"
+        f"📊 **当前组进度：** 第 `{page}/{total_pages}` 组 (每组10个)\n"
+        f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个文件（共 {total_files} 个）"
         f"{warning_suffix}"
     )
 
@@ -697,14 +673,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role = get_user_role(user_id)
     data = query.data
-
     is_admin = is_admin_user(user_id, role)
 
     if data.startswith("sendpage_") and not is_admin:
         now = time.time()
         last_click = context.user_data.get("last_page_click_time", 0)
         cooldown = 10
-        
         if now - last_click < cooldown:
             remaining = int(cooldown - (now - last_click))
             await query.answer(f"⏳ 正在接收或冷却中，请等待 {remaining} 秒后再点击！", show_alert=True)
@@ -722,6 +696,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_page_jump"] = True
         await query.message.reply_text("💬 请回复你想跳转到的**页码数字**：")
 
+    # 🎯 处理提取时的自由跳页点击，带 5 秒冷却
+    elif data.startswith("ext_jump_"):
+        now = time.time()
+        last_jump = context.user_data.get("last_jump_action_time", 0)
+        if now - last_jump < 5:
+            remaining = int(5 - (now - last_jump))
+            await query.answer(f"⏳ 冷却中，请等待 {remaining} 秒", show_alert=True)
+            return
+            
+        code = data.split("_")[2]
+        total_p = context.user_data.get("active_total_pages", 1)
+        context.user_data["awaiting_extract_jump"] = True
+        context.user_data["active_extract_code"] = code
+        await query.message.reply_text(f"🎯 **自由跳页模式**\n\n当前总共有 `1 ~ {total_p}` 组文件（每组10个）。\n请直接在对话框中**回复你想跳转的组数编号**（例如：`3`）：", parse_mode="Markdown")
+
     elif data.startswith("del_"):
         _, code, current_page = data.split("_")
         db.delete_pack_by_code(code)
@@ -737,19 +726,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("get_"):
         code = data.split("_")[1]
-        
         if not is_admin:
             is_cd, remaining_sec = db.check_user_code_cooldown(user_id, code, hours=2)
             if is_cd:
                 mins = math.ceil(remaining_sec / 60)
-                await query.message.reply_text(
-                    f"⏳ **提取码冷却中**\n\n"
-                    f"该提取码 `{code}` 在 2 小时内已被提取过！\n"
-                    f"请等待 **{mins} 分钟** 后再试。",
-                    parse_mode="Markdown"
-                )
+                await query.message.reply_text(f"⏳ **提取码冷却中**\n\n该提取码 `{code}` 在 2 小时内已被提取过！\n请等待 **{mins} 分钟** 后再试。", parse_mode="Markdown")
                 return
-
         await send_batch_files(update, context, code=code, page=1, user_id=user_id)
 
     elif data.startswith("sendpage_"):
