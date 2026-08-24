@@ -579,7 +579,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     chunk = file_items[start_idx:end_idx]
 
     if page == 1:
-        db.update_code_last_extracted(code)
+        db.update_user_code_extraction(user_id, code)
 
     if page > 1:
         waiting_msg = await context.bot.send_message(
