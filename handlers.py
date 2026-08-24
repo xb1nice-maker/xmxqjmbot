@@ -341,7 +341,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pack = db.get_pack_by_code(text)
         if pack:
             if not is_admin_user(user_id, role):
-                # 💡 改为传入 user_id 的用户独立冷却检查
                 is_cd, remaining_sec = db.check_user_code_cooldown(user_id, text, hours=2)
                 if is_cd:
                     mins = math.ceil(remaining_sec / 60)
@@ -359,7 +358,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
-            # 💡 传递 user_id 过去
             await send_batch_files(update, context, code=text, page=1, user_id=user_id)
         else:
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
@@ -556,7 +554,7 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
 # -------------------------------------------------------------
-# 📤 提取核心逻辑（直接使用存下来的 file_id 发送）
+# 📤 提取核心逻辑（具备自动跳过失效文件功能）
 # -------------------------------------------------------------
 async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None):
     chat_id = update.effective_chat.id
@@ -568,7 +566,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         else: await update.message.reply_text(text)
         return
 
-    # 如果没传 user_id，尝试从 update 中获取
     if not user_id and update.effective_user:
         user_id = update.effective_user.id
 
@@ -584,7 +581,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     chunk = file_items[start_idx:end_idx]
 
     if page == 1 and user_id:
-        # 💡 使用用户独立的更新提取记录函数
         db.update_user_code_extraction(user_id, code)
 
     if page > 1:
@@ -599,22 +595,27 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         except Exception:
             pass
 
+    failed_count = 0
     try:
         if len(chunk) == 1:
             item = chunk[0]
             f_id = item.get("file_id")
             f_type = item.get("type", "document")
             
-            if f_type == "photo":
-                await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-            elif f_type == "video":
-                await context.bot.send_video(chat_id=chat_id, video=f_id)
-            elif f_type == "audio":
-                await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-            elif f_type == "voice":
-                await context.bot.send_voice(chat_id=chat_id, voice=f_id)
-            else:
-                await context.bot.send_document(chat_id=chat_id, document=f_id)
+            try:
+                if f_type == "photo":
+                    await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+                elif f_type == "video":
+                    await context.bot.send_video(chat_id=chat_id, video=f_id)
+                elif f_type == "audio":
+                    await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+                elif f_type == "voice":
+                    await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+                else:
+                    await context.bot.send_document(chat_id=chat_id, document=f_id)
+            except Exception as single_err:
+                logger.warning(f"⚠️ 单文件发送失败已跳过 [{f_id}]: {single_err}")
+                failed_count += 1
         else:
             media_group = []
             for item in chunk:
@@ -641,19 +642,25 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                     for item in chunk:
                         f_id = item.get("file_id")
                         f_type = item.get("type", "document")
-                        if f_type == "photo":
-                            await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-                        elif f_type == "video":
-                            await context.bot.send_video(chat_id=chat_id, video=f_id)
-                        elif f_type == "audio":
-                            await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                        else:
-                            await context.bot.send_document(chat_id=chat_id, document=f_id)
+                        try:
+                            if f_type == "photo":
+                                await context.bot.send_photo(chat_id=chat_id, photo=f_id)
+                            elif f_type == "video":
+                                await context.bot.send_video(chat_id=chat_id, video=f_id)
+                            elif f_type == "audio":
+                                await context.bot.send_audio(chat_id=chat_id, audio=f_id)
+                            elif f_type == "voice":
+                                await context.bot.send_voice(chat_id=chat_id, voice=f_id)
+                            else:
+                                await context.bot.send_document(chat_id=chat_id, document=f_id)
+                        except Exception as item_err:
+                            logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
+                            failed_count += 1
 
     except Exception as e:
-        logger.error(f"❌ 提取推送文件失败: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 发送文件失败: {e}")
-        return
+        logger.error(f"❌ 提取推送批次主逻辑异常: {e}")
+
+    warning_suffix = f"\n⚠️ *(其中有 {failed_count} 个文件因长期未调用已失效被自动跳过)*" if failed_count > 0 else ""
 
     buttons = []
     if page < total_pages:
@@ -668,6 +675,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         f"📦 **提取码：** `{code}`\n"
         f"📊 **当前进度：** 已发送第 `{page}/{total_pages}` 组\n"
         f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个（共 {total_files} 个文件）"
+        f"{warning_suffix}"
     )
 
     await context.bot.send_message(chat_id=chat_id, text=status_msg, reply_markup=markup, parse_mode="Markdown")
@@ -731,7 +739,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = data.split("_")[1]
         
         if not is_admin:
-            # 💡 按钮回调中也改为用户独立冷却检查
             is_cd, remaining_sec = db.check_user_code_cooldown(user_id, code, hours=2)
             if is_cd:
                 mins = math.ceil(remaining_sec / 60)
@@ -743,7 +750,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-        # 💡 传递 user_id 过去
         await send_batch_files(update, context, code=code, page=1, user_id=user_id)
 
     elif data.startswith("sendpage_"):
@@ -752,7 +758,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        # 💡 翻页时同样传递 user_id
         await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id)
 
     elif data == "cancel_extract":
