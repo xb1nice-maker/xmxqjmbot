@@ -245,7 +245,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         files = context.user_data.get("pack_files", [])
         if not files:
-            await update.message.reply_text("⚠️ 你还没有发送任何文件！请先发送文件后再尝试打包。")
+            await update.message.reply_text("⚠️ 你还没有发送任何有效文件！请先发送正常文件后再尝试打包。")
             return
 
         code = db.save_user_pack(user_id, files)
@@ -255,7 +255,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             f"🎉 **全部件数已打包完成！**\n\n"
-            f"• 成功打包：`{len(files)}` 个文件\n"
+            f"• 成功打包：`{len(files)}` 个有效文件\n"
             f"• 表情提取码：`{code}`\n\n"
             f"👉 发送提取码 `{code}` 即可随时提取全部打包文件！",
             reply_markup=get_main_keyboard(role, user_id),
@@ -345,7 +345,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
 # -------------------------------------------------------------
-# 📥 存储逻辑
+# 📥 存储与自动剔除问题文件逻辑
 # -------------------------------------------------------------
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
@@ -369,25 +369,33 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     file_type = "document"
     file_id = None
+    is_valid_file = True
 
-    if msg.photo:
-        file_type = "photo"
-        file_id = msg.photo[-1].file_id
-    elif msg.video:
-        file_type = "video"
-        file_id = msg.video.file_id
-    elif msg.audio:
-        file_type = "audio"
-        file_id = msg.audio.file_id
-    elif msg.voice:
-        file_type = "voice"
-        file_id = msg.voice.file_id
-    elif msg.document:
-        file_type = "document"
-        file_id = msg.document.file_id
+    try:
+        if msg.photo:
+            file_type = "photo"
+            file_id = msg.photo[-1].file_id
+        elif msg.video:
+            file_type = "video"
+            file_id = msg.video.file_id
+        elif msg.audio:
+            file_type = "audio"
+            file_id = msg.audio.file_id
+        elif msg.voice:
+            file_type = "voice"
+            file_id = msg.voice.file_id
+        elif msg.document:
+            file_type = "document"
+            file_id = msg.document.file_id
+        else:
+            is_valid_file = False
+    except Exception as e:
+        logger.warning(f"⚠️ 提取文件 ID 失败: {e}")
+        is_valid_file = False
 
-    if not file_id:
-        await update.message.reply_text("⚠️ 未能识别到有效的文件内容。")
+    # 🚨 判定：如果是不支持或损坏/限制文件，直接提示并阻断
+    if not is_valid_file or not file_id:
+        await msg.reply_text("⚠️ **检测到问题/受限文件，已自动去除！**\n该文件将不会进入任何生成的提取码中。", parse_mode="Markdown")
         return
 
     file_item = {"type": file_type, "file_id": file_id}
@@ -408,7 +416,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         progress_msg_id = context.user_data.get("packing_progress_msg_id")
         status_text = (
             f"⏳ **正在缓存接收中...**\n"
-            f"📦 当前已缓存：`{current_count}` 个文件\n\n"
+            f"📦 当前已成功缓存：`{current_count}` 个文件\n\n"
             f"💡 发送完毕后，请点击下方【✅ 完成打包并生成提取码】。"
         )
 
@@ -433,7 +441,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"❌ 保存文件失败: {e}")
-            await status_msg.edit_text("❌ 保存文件失败，请稍后再试。")
+            await status_msg.edit_text("⚠️ **检测到问题文件已被自动去除！** 未能生成提取码。")
 
 # -------------------------------------------------------------
 # 📢 辅助渲染与管理函数
