@@ -56,7 +56,7 @@ def init_db():
                 );
             """)
 
-            # 文件包主表（移除了全局的 last_extracted_at，改用用户独立提取记录表）
+            # 文件包主表（已增加 protect_content 字段存储转发权限）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS file_bundles (
                     code VARCHAR(50) PRIMARY KEY,
@@ -64,11 +64,18 @@ def init_db():
                     file_id TEXT,
                     files TEXT,
                     file_count INT DEFAULT 1,
+                    protect_content BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 );
             """)
 
-            # 💡 新增：用户独立提取记录表（用于实现每个用户独立的 2 小时冷却）
+            # 💡 兼容老数据库：如果表已存在但没有 protect_content 字段，自动执行补全
+            cur.execute("""
+                ALTER TABLE file_bundles 
+                ADD COLUMN IF NOT EXISTS protect_content BOOLEAN DEFAULT FALSE;
+            """)
+
+            # 用户独立提取记录表（用于实现每个用户独立的 2 小时冷却）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_extractions (
                     user_id BIGINT,
@@ -96,7 +103,7 @@ def init_db():
 # ⏱️ 用户独立提取码 CD 判定逻辑
 # -------------------------------------------------------------
 def check_user_code_cooldown(user_id: int, code: str, hours: int = 2):
-    """检查特定用户对特定提取码的独立冷却状态"""
+    """检查特定用户对特定提取码的独立冷却状态[cite: 1]"""
     conn = get_connection()
     try:
         user_id = int(user_id)
@@ -127,7 +134,7 @@ def check_user_code_cooldown(user_id: int, code: str, hours: int = 2):
         release_connection(conn)
 
 def update_user_code_extraction(user_id: int, code: str):
-    """更新特定用户最后提取该码的时间"""
+    """更新特定用户最后提取该码的时间[cite: 1]"""
     conn = get_connection()
     try:
         user_id = int(user_id)
@@ -237,7 +244,6 @@ def get_all_user_ids():
         release_connection(conn)
 
 def set_user_role(user_id: int, role: str):
-    """设置用户的角色（如 admin, user, blacklist）"""
     conn = get_connection()
     try:
         user_id = int(user_id)
@@ -258,7 +264,8 @@ def set_user_role(user_id: int, role: str):
 # -------------------------------------------------------------
 # 📦 文件包与提取码管理
 # -------------------------------------------------------------
-def save_user_pack(user_id: int, files: list) -> str:
+def save_user_pack(user_id: int, files: list, protect_content: bool = False) -> str:
+    """保存用户上传的文件包，支持传入 protect_content 转发权限"""
     init_db()
     conn = get_connection()
     try:
@@ -271,11 +278,11 @@ def save_user_pack(user_id: int, files: list) -> str:
             try:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO file_bundles (code, user_id, file_id, files, file_count)
-                        VALUES (%s, %s, %s, %s, %s);
-                    """, (code, clean_user_id, first_msg_id, files_json, len(files)))
+                        INSERT INTO file_bundles (code, user_id, file_id, files, file_count, protect_content)
+                        VALUES (%s, %s, %s, %s, %s, %s);
+                    """, (code, clean_user_id, first_msg_id, files_json, len(files), protect_content))
                     conn.commit()
-                    logger.info(f"✅ 数据库成功写入，提取码: {code}，用户ID: {clean_user_id}")
+                    logger.info(f"✅ 数据库成功写入，提取码: {code}，用户ID: {clean_user_id}，防转发: {protect_content}")
                     return code
             except psycopg2.IntegrityError:
                 conn.rollback()
@@ -289,13 +296,31 @@ def save_user_pack(user_id: int, files: list) -> str:
     finally:
         release_connection(conn)
 
+def update_pack_protect_status(code: str, protect_status: bool):
+    """更新指定提取码的转发保护状态"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE file_bundles 
+                SET protect_content = %s 
+                WHERE code = %s;
+            """, (protect_status, code))
+            conn.commit()
+            logger.info(f"✅ 成功更新提取码 {code} 的防转发状态为: {protect_status}")
+    except Exception as e:
+        logger.error(f"❌ 更新提取码保护状态失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
 def get_user_packs(user_id: int):
     conn = get_connection()
     try:
         clean_user_id = int(user_id)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT code, files, file_id, created_at
+                SELECT code, files, file_id, created_at, protect_content
                 FROM file_bundles 
                 WHERE user_id = %s 
                 ORDER BY created_at DESC;
@@ -312,7 +337,8 @@ def get_user_packs(user_id: int):
                     
                 results.append({
                     "code": r["code"],
-                    "count": len(files_data)
+                    "count": len(files_data),
+                    "protect_content": r.get("protect_content", False)
                 })
             logger.info(f"🔍 查询用户 {clean_user_id} 的上传记录，查到 {len(results)} 条记录")
             return results
@@ -341,7 +367,8 @@ def get_pack_by_code(code: str):
                 "code": row["code"],
                 "owner_id": row.get("user_id"),
                 "count": len(files_data),
-                "files": files_data
+                "files": files_data,
+                "protect_content": row.get("protect_content", False)
             }
     except Exception as e:
         logger.error(f"读取提取码失败: {e}")
@@ -354,7 +381,7 @@ def get_all_global_packs():
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT code, user_id, files, file_id 
+                SELECT code, user_id, files, file_id, protect_content 
                 FROM file_bundles 
                 ORDER BY created_at DESC;
             """)
@@ -371,7 +398,8 @@ def get_all_global_packs():
                 results.append({
                     "code": r["code"],
                     "owner_id": r["user_id"],
-                    "count": len(files_data)
+                    "count": len(files_data),
+                    "protect_content": r.get("protect_content", False)
                 })
             return results
     except Exception as e:
