@@ -76,10 +76,11 @@ def get_main_keyboard(user_role: str, user_id: int = 0):
         keyboard[1].append(KeyboardButton("⚙️ 管理员功能"))
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_packing_keyboard():
+def get_packing_keyboard(protect_status: bool = False):
+    protect_icon = "🔒 开启" if protect_status else "🔓 关闭"
     keyboard = [
-        [KeyboardButton("✅ 完成打包并生成提取码")],
-        [KeyboardButton("❌ 取消打包")]
+        [KeyboardButton(f"🛡️ 防转发保护: {protect_icon}")],
+        [KeyboardButton("✅ 完成打包并生成提取码"), KeyboardButton("❌ 取消打包")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -113,6 +114,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["packing_mode"] = False
     context.user_data["pack_files"] = []
+    context.user_data["pack_protect"] = False  # 默认不开启防转发
     context.user_data["packing_progress_msg_id"] = None
     db.add_user_if_not_exists(user_id)
 
@@ -226,14 +228,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📦 多文件打包模式":
         context.user_data["packing_mode"] = True
         context.user_data["pack_files"] = []
+        context.user_data["pack_protect"] = False
         context.user_data["packing_progress_msg_id"] = None
         await update.message.reply_text(
             f"📦 **已进入多文件打包模式！**\n\n"
             f"现在你可以批量发送文件/图片/视频。\n"
             f"我会在收到文件时实时提示更新进度！\n"
-            f"全部发送完毕后，请点击下方：\n"
+            f"你可以点击下方按钮切换该文件包的防转发保护状态。\n"
+            f"全部发送完毕后，请点击：\n"
             f"👇 **【✅ 完成打包并生成提取码】**",
-            reply_markup=get_packing_keyboard(),
+            reply_markup=get_packing_keyboard(False),
+            parse_mode="Markdown"
+        )
+        return
+
+    elif text.startswith("🛡️ 防转发保护:"):
+        if not context.user_data.get("packing_mode"):
+            await update.message.reply_text("⚠️ 当前未处于打包模式。")
+            return
+        current_protect = context.user_data.get("pack_protect", False)
+        new_protect = not current_protect
+        context.user_data["pack_protect"] = new_protect
+        
+        status_word = "开启 (开启后用户无法转发/保存文件)" if new_protect else "关闭 (允许自由转发)"
+        await update.message.reply_text(
+            f"🛡️ **防转发状态已切换为：** `{status_word}`",
+            reply_markup=get_packing_keyboard(new_protect),
             parse_mode="Markdown"
         )
         return
@@ -248,14 +268,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ 你还没有发送任何有效文件！请先发送正常文件后再尝试打包。")
             return
 
-        code = db.save_user_pack(user_id, files)
+        protect_status = context.user_data.get("pack_protect", False)
+        code = db.save_user_pack(user_id, files, protect_content=protect_status)
         context.user_data["packing_mode"] = False
         context.user_data["pack_files"] = []
+        context.user_data["pack_protect"] = False
         context.user_data["packing_progress_msg_id"] = None
 
+        protect_label = "🔒 开启" if protect_status else "🔓 关闭"
         await update.message.reply_text(
             f"🎉 **全部件数已打包完成！**\n\n"
             f"• 成功打包：`{len(files)}` 个有效文件\n"
+            f"• 防转发保护：`{protect_label}`\n"
             f"• 表情提取码：`{code}`\n\n"
             f"👉 发送提取码 `{code}` 即可随时提取全部打包文件！",
             reply_markup=get_main_keyboard(role, user_id),
@@ -266,6 +290,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "❌ 取消打包":
         context.user_data["packing_mode"] = False
         context.user_data["pack_files"] = []
+        context.user_data["pack_protect"] = False
         context.user_data["packing_progress_msg_id"] = None
         await update.message.reply_text("❌ 已取消打包，临时缓存已清空。", reply_markup=get_main_keyboard(role, user_id))
         return
@@ -334,9 +359,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
+            protect_label = "🔒 开启" if pack.get("protect_content") else "🔓 关闭"
             await update.message.reply_text(
                 f"📦 **成功识别提取码**：`{text}`\n"
                 f"📦 **包含文件**：`{pack['count']}` 个\n"
+                f"🛡️ **防转发状态**：`{protect_label}`\n"
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
@@ -432,7 +459,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         status_msg = await msg.reply_text("⏳ **正在处理并生成提取码...**", parse_mode="Markdown")
         try:
-            code = db.save_user_pack(user_id, [file_item])
+            code = db.save_user_pack(user_id, [file_item], protect_content=False)
             await status_msg.edit_text(
                 f"✅ **文件转存成功！**\n\n"
                 f"🎉 你的表情提取码为：\n`{code}`\n\n"
@@ -478,10 +505,15 @@ async def render_my_files_page(update, context, user_id, page=1, is_new_message=
 
     for item in current_packs:
         code, count = item["code"], item["count"]
-        msg_text += f"• 表情码：`{code}` （包含 {count} 个文件）\n"
+        protect = item.get("protect_content", False)
+        protect_label = "🔒 开启" if protect else "🔓 关闭"
+        toggle_label = "🔓 关闭保护" if protect else "🔒 开启保护"
+        
+        msg_text += f"• 表情码：`{code}` | 包含 {count} 个 | 防转发: `{protect_label}`\n"
         inline_keyboard.append([
-            InlineKeyboardButton(f"📥 提取 {code}", callback_data=f"get_{code}"),
-            InlineKeyboardButton(f"🗑️ 删除 {code}", callback_data=f"del_{code}_{page}")
+            InlineKeyboardButton(f"📥 提取", callback_data=f"get_{code}"),
+            InlineKeyboardButton(toggle_label, callback_data=f"toggle_{code}_{page}"),
+            InlineKeyboardButton(f"🗑️ 删除", callback_data=f"del_{code}_{page}")
         ])
 
     nav_row = []
@@ -513,10 +545,15 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     inline_keyboard = []
     for item in current_packs:
         owner, code, count = item["owner_id"], item["code"], item["count"]
-        msg_text += f"👤 **用户 ID:** `{owner}`\n└ 提取码: `{code}` | 文件数: `{count}` 个\n\n"
+        protect = item.get("protect_content", False)
+        protect_label = "🔒 开启" if protect else "🔓 关闭"
+        toggle_label = "🔓 关闭保护" if protect else "🔒 开启保护"
+
+        msg_text += f"👤 **用户 ID:** `{owner}`\n└ 提取码: `{code}` | 文件数: `{count}` | 防转发: `{protect_label}`\n\n"
         inline_keyboard.append([
-            InlineKeyboardButton(f"📥 提取 {code}", callback_data=f"get_{code}"),
-            InlineKeyboardButton(f"🚫 强行删除 {code}", callback_data=f"adm_del_{code}_{page}")
+            InlineKeyboardButton(f"📥 提取", callback_data=f"get_{code}"),
+            InlineKeyboardButton(toggle_label, callback_data=f"adm_toggle_{code}_{page}"),
+            InlineKeyboardButton(f"🚫 删码", callback_data=f"adm_del_{code}_{page}")
         ])
 
     nav_row = []
@@ -545,6 +582,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         user_id = update.effective_user.id
 
     file_items = pack["files"]
+    protect_content = pack.get("protect_content", False)  # 获取当前的防转发属性
     total_files = len(file_items)
     chunk_size = 10  # 每 10 个文件为一组
     total_pages = math.ceil(total_files / chunk_size)
@@ -586,11 +624,11 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             f_id = item.get("file_id")
             f_type = item.get("type", "document")
             try:
-                if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-                elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id)
-                elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id)
-                else: await context.bot.send_document(chat_id=chat_id, document=f_id)
+                if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id, protect_content=protect_content)
+                elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id, protect_content=protect_content)
+                elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id, protect_content=protect_content)
+                elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id, protect_content=protect_content)
+                else: await context.bot.send_document(chat_id=chat_id, document=f_id, protect_content=protect_content)
             except Exception as single_err:
                 logger.warning(f"⚠️ 单文件发送失败已跳过 [{f_id}]: {single_err}")
                 failed_count += 1
@@ -607,18 +645,19 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
             if media_group:
                 try:
-                    await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+                    # 注意：send_media_group 的 protect_content 参数支持在 telegram.ext / 20+ 中传递
+                    await context.bot.send_media_group(chat_id=chat_id, media=media_group, protect_content=protect_content)
                 except Exception as album_err:
                     logger.warning(f"⚠️ send_media_group 聚合发送失败: {album_err}，降级为逐个发送...")
                     for item in chunk:
                         f_id = item.get("file_id")
                         f_type = item.get("type", "document")
                         try:
-                            if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id)
-                            elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id)
-                            elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id)
-                            elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, video=f_id)
-                            else: await context.bot.send_document(chat_id=chat_id, document=f_id)
+                            if f_type == "photo": await context.bot.send_photo(chat_id=chat_id, photo=f_id, protect_content=protect_content)
+                            elif f_type == "video": await context.bot.send_video(chat_id=chat_id, video=f_id, protect_content=protect_content)
+                            elif f_type == "audio": await context.bot.send_audio(chat_id=chat_id, audio=f_id, protect_content=protect_content)
+                            elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id, protect_content=protect_content)
+                            else: await context.bot.send_document(chat_id=chat_id, document=f_id, protect_content=protect_content)
                         except Exception as item_err:
                             logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
                             failed_count += 1
@@ -634,7 +673,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     
     current_row = []
     for p_num in range(start_num, end_num + 1):
-        # 当前查看的页码加方括号高亮
         btn_text = f"[{p_num}]" if p_num == page else str(p_num)
         current_row.append(InlineKeyboardButton(btn_text, callback_data=f"sendpage_{code}_{p_num}_{screen_group}"))
         if len(current_row) == 5:
@@ -643,7 +681,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     if current_row:
         buttons.append(current_row)
 
-    # 🔀 大区块数字翻页（上一组 15 个数字 / 下一组 15 个数字）
+    # 🔀 大区块数字翻页
     block_nav_row = []
     if screen_group > 0:
         block_nav_row.append(InlineKeyboardButton("⬅️ 上一组数字", callback_data=f"block_{code}_{screen_group - 1}"))
@@ -655,8 +693,10 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     buttons.append([InlineKeyboardButton("❌ 结束提取", callback_data="cancel_extract")])
 
     markup = InlineKeyboardMarkup(buttons)
+    protect_label = "🔒 开启" if protect_content else "🔓 关闭"
     status_msg = (
         f"📦 **提取码：** `{code}`\n"
+        f"🛡️ **防转发保护：** `{protect_label}`\n"
         f"📊 **当前组进度：** 第 `{page}/{total_pages}` 页 (每组10个)\n"
         f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个文件（共 {total_files} 个）"
         f"{warning_suffix}"
@@ -715,6 +755,25 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"👑 **管理员删码：** 提取码 `{code}` 已强行清空！", parse_mode="Markdown")
             await render_admin_global_packs_page(update, context, page=int(current_page))
 
+    elif data.startswith("toggle_"):
+        _, code, current_page = data.split("_")
+        pack = db.get_pack_by_code(code)
+        if pack:
+            new_status = not pack.get("protect_content", False)
+            db.update_pack_protect_status(code, new_status)
+            await query.message.reply_text(f"✅ 提取码 `{code}` 的防转发保护已更新为：`{'开启' if new_status else '关闭'}`", parse_mode="Markdown")
+        await render_my_files_page(update, context, user_id=user_id, page=int(current_page))
+
+    elif data.startswith("adm_toggle_"):
+        if is_admin:
+            _, _, code, current_page = data.split("_")
+            pack = db.get_pack_by_code(code)
+            if pack:
+                new_status = not pack.get("protect_content", False)
+                db.update_pack_protect_status(code, new_status)
+                await query.message.reply_text(f"👑 **管理员操作**：提取码 `{code}` 的防转发保护已更新为：`{'开启' if new_status else '关闭'}`", parse_mode="Markdown")
+            await render_admin_global_packs_page(update, context, page=int(current_page))
+
     elif data.startswith("get_"):
         code = data.split("_")[1]
         if not is_admin:
@@ -734,7 +793,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id, screen_group=int(screen_group_str))
 
     elif data.startswith("block_"):
-        # 仅切换大数字区块（如 1~15 翻到 16~30），不发送文件
         _, code, screen_group_str = data.split("_")
         screen_group = int(screen_group_str)
         
@@ -749,7 +807,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_screen_groups = math.ceil(total_pages / max_buttons_per_screen)
         screen_group = max(0, min(screen_group, total_screen_groups - 1))
         
-        # 重新渲染当前区块的按钮面板
         start_num = screen_group * max_buttons_per_screen + 1
         end_num = min(start_num + max_buttons_per_screen - 1, total_pages)
         
