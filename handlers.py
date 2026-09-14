@@ -6,7 +6,7 @@ import logging
 from telegram import (
     Update, ReplyKeyboardMarkup, KeyboardButton, 
     InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaDocument, InputMediaPhoto, InputMediaVideo, InputMediaAudio
+    InputMediaDocument, InputMediaPhoto, InputMediaVideo, InputMediaAudio, Bot
 )
 from telegram.ext import ContextTypes
 from permissions import get_user_role, ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_BLACKLIST
@@ -16,16 +16,11 @@ import database as db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 💡 请在此处填入你自己的 Telegram 账号数字 ID（作为最高权限超级管理员）
 SUPER_ADMIN_ID = 8762272568  
 
 def is_admin_user(user_id: int, role: str) -> bool:
-    """辅助函数：统一判定用户是否具备管理员权限"""
     return (user_id == SUPER_ADMIN_ID) or (user_id == ADMIN_ID) or (role in [ROLE_SUPER_ADMIN, ROLE_ADMIN])
 
-# -------------------------------------------------------------
-# 🛡️ 加群状态校验
-# -------------------------------------------------------------
 async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
     if not user:
@@ -64,9 +59,6 @@ async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TY
         
     return False
 
-# -------------------------------------------------------------
-# ⌨️ 键盘布局
-# -------------------------------------------------------------
 def get_main_keyboard(user_role: str, user_id: int = 0):
     keyboard = [
         [KeyboardButton("📦 多文件打包模式"), KeyboardButton("🔍 我上传的文件码")],
@@ -88,13 +80,11 @@ def get_admin_keyboard():
     keyboard = [
         [KeyboardButton("📊 系统统计数据"), KeyboardButton("🗄️ 全局文件码库")],
         [KeyboardButton("📢 广播消息"), KeyboardButton("🚫 拉黑用户"), KeyboardButton("✅ 解封用户")],
-        [KeyboardButton("➕ 添加管理员"), KeyboardButton("↩️ 返回主菜单")]
+        [KeyboardButton("➕ 添加管理员"), KeyboardButton("🤖 克隆机器人管理")],
+        [KeyboardButton("↩️ 返回主菜单")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# -------------------------------------------------------------
-# 🚀 指令与文本处理
-# -------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -114,7 +104,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["packing_mode"] = False
     context.user_data["pack_files"] = []
-    context.user_data["pack_protect"] = False  # 默认不开启防转发
+    context.user_data["pack_protect"] = False  
     context.user_data["packing_progress_msg_id"] = None
     db.add_user_if_not_exists(user_id)
 
@@ -181,6 +171,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_user_if_not_exists(user_id)
 
     state = context.user_data.get("admin_state")
+
+    if text == "🤖 克隆机器人管理":
+        if not is_admin_user(user_id, role):
+            await update.message.reply_text("❌ 您没有权限执行此操作。")
+            return
+        
+        cloned_list = db.get_all_cloned_bots()
+        text_content = f"🤖 **克隆机器人管理后台**\n\n当前已成功克隆并运行的 Bot 数量：`{len(cloned_list)}` 个\n\n"
+        
+        keyboard = []
+        for item in cloned_list:
+            t = item["token"]
+            uname = item["bot_username"] or "未知"
+            mask_token = t[:6] + "..." + t[-4:]
+            text_content += f"• @{uname} (`{mask_token}`)\n"
+            keyboard.append([InlineKeyboardButton(f"🗑️ 删除克隆 @{uname}", callback_data=f"clone_del_{t}")])
+            
+        keyboard.append([InlineKeyboardButton("➕ 添加新克隆 Bot", callback_data="clone_add_start")])
+        await update.message.reply_text(text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
+    if state == "awaiting_clone_token":
+        context.user_data["admin_state"] = None
+        new_token = text
+        
+        try:
+            temp_bot = Bot(token=new_token)
+            bot_info = await temp_bot.get_me()
+            bot_username = bot_info.username
+        except Exception as e:
+            await update.message.reply_text(f"❌ **Token 无效或无法连接 Telegram API**\n错误原因: `{e}`", parse_mode="Markdown")
+            return
+            
+        db.save_cloned_bot(new_token, user_id, bot_username)
+        
+        from bot import start_single_cloned_bot
+        asyncio.create_task(start_single_cloned_bot(new_token, context.application))
+        
+        await update.message.reply_text(
+            f"✅ **克隆机器人添加成功并已在后台启动！**\n\n"
+            f"• 机器人用户名：@{bot_username}\n"
+            f"• Token：`{new_token}`\n\n"
+            f"现在用户可以直接给 @{bot_username} 发送提取码或文件了！",
+            parse_mode="Markdown"
+        )
+        return
 
     if text == "➕ 添加管理员":
         if not is_admin_user(user_id, role):
@@ -371,9 +407,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❓ 未找到提取码：`{text}`，请检查是否输入正确。")
 
-# -------------------------------------------------------------
-# 📥 存储与自动剔除问题文件逻辑
-# -------------------------------------------------------------
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -420,7 +453,6 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"⚠️ 提取文件 ID 失败: {e}")
         is_valid_file = False
 
-    # 🚨 判定：如果是不支持或损坏/限制文件，直接提示并阻断
     if not is_valid_file or not file_id:
         await msg.reply_text("⚠️ **检测到问题/受限文件，已自动去除！**\n该文件将不会进入任何生成的提取码中。", parse_mode="Markdown")
         return
@@ -470,9 +502,6 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"❌ 保存文件失败: {e}")
             await status_msg.edit_text("⚠️ **检测到问题文件已被自动去除！** 未能生成提取码。")
 
-# -------------------------------------------------------------
-# 📢 辅助渲染与管理函数
-# -------------------------------------------------------------
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, broadcast_text: str):
     all_users = db.get_all_user_ids()
     await update.message.reply_text(f"⏳ 开始向 `{len(all_users)}` 名用户推送广播...", parse_mode="Markdown")
@@ -565,9 +594,6 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
     if is_new_message: await update.message.reply_text(msg_text, reply_markup=markup, parse_mode="Markdown")
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
-# -------------------------------------------------------------
-# 📤 提取核心逻辑（支持 15 个数字区块翻页矩阵）
-# -------------------------------------------------------------
 async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None, screen_group: int = None):
     chat_id = update.effective_chat.id
     pack = db.get_pack_by_code(code)
@@ -582,14 +608,13 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         user_id = update.effective_user.id
 
     file_items = pack["files"]
-    protect_content = pack.get("protect_content", False)  # 获取当前的防转发属性
+    protect_content = pack.get("protect_content", False)  
     total_files = len(file_items)
-    chunk_size = 10  # 每 10 个文件为一组
+    chunk_size = 10  
     total_pages = math.ceil(total_files / chunk_size)
 
     page = max(1, min(page, total_pages))
     
-    # 自动计算当前页所在的数字区块（每 15 个数字为一组）
     max_buttons_per_screen = 15
     total_screen_groups = math.ceil(total_pages / max_buttons_per_screen)
     
@@ -604,7 +629,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     if page == 1 and user_id and not update.callback_query:
         db.update_user_code_extraction(user_id, code)
 
-    # 发送 10 秒缓冲提示
     if update.callback_query:
         waiting_msg = await context.bot.send_message(
             chat_id=chat_id, 
@@ -645,7 +669,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
             if media_group:
                 try:
-                    # 注意：send_media_group 的 protect_content 参数支持在 telegram.ext / 20+ 中传递
                     await context.bot.send_media_group(chat_id=chat_id, media=media_group, protect_content=protect_content)
                 except Exception as album_err:
                     logger.warning(f"⚠️ send_media_group 聚合发送失败: {album_err}，降级为逐个发送...")
@@ -666,7 +689,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     warning_suffix = f"\n⚠️ *(已检测TG标记问题文件已跳过 {failed_count} 个)*" if failed_count > 0 else ""
 
-    # 🎛️ 构建数字按钮矩阵（每 15 个数字一组，每行 5 个）
     buttons = []
     start_num = screen_group * max_buttons_per_screen + 1
     end_num = min(start_num + max_buttons_per_screen - 1, total_pages)
@@ -681,7 +703,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     if current_row:
         buttons.append(current_row)
 
-    # 🔀 大区块数字翻页
     block_nav_row = []
     if screen_group > 0:
         block_nav_row.append(InlineKeyboardButton("⬅️ 上一组数字", callback_data=f"block_{code}_{screen_group - 1}"))
@@ -704,9 +725,6 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     await context.bot.send_message(chat_id=chat_id, text=status_msg, reply_markup=markup, parse_mode="Markdown")
 
-# -------------------------------------------------------------
-# 🔀 Callback 路由
-# -------------------------------------------------------------
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
@@ -723,7 +741,25 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     is_admin = is_admin_user(user_id, role)
 
-    # 点击具体数字页时触发 10 秒冷却限制检查
+    if data == "clone_add_start":
+        if is_admin:
+            context.user_data["admin_state"] = "awaiting_clone_token"
+            await query.message.reply_text(
+                "➕ **添加克隆机器人引导**\n\n"
+                "请把你在 @BotFather 那里新申请到的 **Bot Token** 直接发送给我：",
+                parse_mode="Markdown"
+            )
+            await query.answer()
+        return
+
+    if data.startswith("clone_del_"):
+        if is_admin:
+            token_to_del = data.replace("clone_del_", "")
+            db.delete_cloned_bot(token_to_del)
+            await query.message.reply_text("✅ 已从数据库移除该克隆 Bot 配置。（重启服务器后将彻底停止运行）", parse_mode="Markdown")
+            await query.answer()
+        return
+
     if data.startswith("sendpage_") and not is_admin:
         now = time.time()
         last_click = context.user_data.get("last_page_click_time", 0)

@@ -5,13 +5,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== Bot 基础配置 ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8875451128:AAFrrCkvRU7q9sQyYSPyOhWkuHmYqdYq504")
-BOT_NAME = "小马星球专属解码bot"
-BOT_USERNAME = os.getenv("BOT_USERNAME", "zmxqwjjmq_bot")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_NAME = "小🐴星球专用bot"
+BOT_USERNAME = os.getenv("BOT_USERNAME", "xmxqjm02_bot")
 
 # ==================== 权限与频道配置 ====================
 # 管理员 ID
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8762272568"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8409736325"))
 
 # VIP 防失联群组 ID
 REQUIRED_GROUP_ID = int(os.getenv("REQUIRED_GROUP_ID", "-1001577873050"))

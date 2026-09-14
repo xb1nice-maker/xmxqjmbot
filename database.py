@@ -16,9 +16,6 @@ EMOJI_POOL = [
     "🎫", "👑", "🏆", "🥇", "🐱", "🐶", "🐼", "🦊", "🐯"
 ]
 
-# -------------------------------------------------------------
-# 🔌 数据库连接池初始化
-# -------------------------------------------------------------
 try:
     db_pool = pool.ThreadedConnectionPool(1, 20, DATABASE_URL)
     logger.info("✅ 数据库连接池初始化成功！")
@@ -40,14 +37,10 @@ def release_connection(conn):
 def generate_emoji_code(length=7):
     return "".join(random.choices(EMOJI_POOL, k=length))
 
-# -------------------------------------------------------------
-# 🛠️ 数据库表初始化
-# -------------------------------------------------------------
 def init_db():
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            # 用户表
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -56,7 +49,6 @@ def init_db():
                 );
             """)
 
-            # 文件包主表（已增加 protect_content 字段存储转发权限）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS file_bundles (
                     code VARCHAR(50) PRIMARY KEY,
@@ -69,13 +61,11 @@ def init_db():
                 );
             """)
 
-            # 💡 兼容老数据库：如果表已存在但没有 protect_content 字段，自动执行补全
             cur.execute("""
                 ALTER TABLE file_bundles 
                 ADD COLUMN IF NOT EXISTS protect_content BOOLEAN DEFAULT FALSE;
             """)
 
-            # 用户独立提取记录表（用于实现每个用户独立的 2 小时冷却）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_extractions (
                     user_id BIGINT,
@@ -85,10 +75,24 @@ def init_db():
                 );
             """)
 
-            # 为 user_id 创建索引
+            # 新增：克隆机器人表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cloned_bots (
+                    token VARCHAR(100) PRIMARY KEY,
+                    admin_id BIGINT,
+                    bot_username VARCHAR(100),
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_file_bundles_user_id 
                 ON file_bundles(user_id);
+            """)
+            
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cloned_bots_admin_id 
+                ON cloned_bots(admin_id);
             """)
 
             conn.commit()
@@ -99,11 +103,47 @@ def init_db():
     finally:
         release_connection(conn)
 
-# -------------------------------------------------------------
-# ⏱️ 用户独立提取码 CD 判定逻辑
-# -------------------------------------------------------------
+def save_cloned_bot(token: str, admin_id: int, bot_username: str):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO cloned_bots (token, admin_id, bot_username)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (token) DO UPDATE SET admin_id = %s, bot_username = %s;
+            """, (token, int(admin_id), bot_username, int(admin_id), bot_username))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"保存克隆机器人失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
+def get_all_cloned_bots():
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT token, admin_id, bot_username FROM cloned_bots;")
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"获取所有克隆机器人失败: {e}")
+        return []
+    finally:
+        release_connection(conn)
+
+def delete_cloned_bot(token: str):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM cloned_bots WHERE token = %s;", (token,))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"删除克隆机器人失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
 def check_user_code_cooldown(user_id: int, code: str, hours: int = 2):
-    """检查特定用户对特定提取码的独立冷却状态[cite: 1]"""
     conn = get_connection()
     try:
         user_id = int(user_id)
@@ -134,7 +174,6 @@ def check_user_code_cooldown(user_id: int, code: str, hours: int = 2):
         release_connection(conn)
 
 def update_user_code_extraction(user_id: int, code: str):
-    """更新特定用户最后提取该码的时间[cite: 1]"""
     conn = get_connection()
     try:
         user_id = int(user_id)
@@ -152,9 +191,6 @@ def update_user_code_extraction(user_id: int, code: str):
     finally:
         release_connection(conn)
 
-# -------------------------------------------------------------
-# 👤 用户与权限管理
-# -------------------------------------------------------------
 def add_user_if_not_exists(user_id: int):
     conn = get_connection()
     try:
@@ -254,18 +290,13 @@ def set_user_role(user_id: int, role: str):
                 ON CONFLICT (user_id) DO UPDATE SET role = %s;
             """, (user_id, role, role))
             conn.commit()
-            logger.info(f"✅ 成功将用户 {user_id} 的角色设为: {role}")
     except Exception as e:
         logger.error(f"❌ 设置用户角色失败: {e}")
         conn.rollback()
     finally:
         release_connection(conn)
 
-# -------------------------------------------------------------
-# 📦 文件包与提取码管理
-# -------------------------------------------------------------
 def save_user_pack(user_id: int, files: list, protect_content: bool = False) -> str:
-    """保存用户上传的文件包，支持传入 protect_content 转发权限"""
     init_db()
     conn = get_connection()
     try:
@@ -282,13 +313,12 @@ def save_user_pack(user_id: int, files: list, protect_content: bool = False) -> 
                         VALUES (%s, %s, %s, %s, %s, %s);
                     """, (code, clean_user_id, first_msg_id, files_json, len(files), protect_content))
                     conn.commit()
-                    logger.info(f"✅ 数据库成功写入，提取码: {code}，用户ID: {clean_user_id}，防转发: {protect_content}")
                     return code
             except psycopg2.IntegrityError:
                 conn.rollback()
                 continue
                 
-        raise RuntimeError("无法生成唯一的提取码（尝试次数过多）")
+        raise RuntimeError("无法生成唯一的提取码")
     except Exception as e:
         logger.error(f"❌ 写入 file_bundles 数据库失败: {e}")
         conn.rollback()
@@ -297,7 +327,6 @@ def save_user_pack(user_id: int, files: list, protect_content: bool = False) -> 
         release_connection(conn)
 
 def update_pack_protect_status(code: str, protect_status: bool):
-    """更新指定提取码的转发保护状态"""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -307,7 +336,6 @@ def update_pack_protect_status(code: str, protect_status: bool):
                 WHERE code = %s;
             """, (protect_status, code))
             conn.commit()
-            logger.info(f"✅ 成功更新提取码 {code} 的防转发状态为: {protect_status}")
     except Exception as e:
         logger.error(f"❌ 更新提取码保护状态失败: {e}")
         conn.rollback()
@@ -340,7 +368,6 @@ def get_user_packs(user_id: int):
                     "count": len(files_data),
                     "protect_content": r.get("protect_content", False)
                 })
-            logger.info(f"🔍 查询用户 {clean_user_id} 的上传记录，查到 {len(results)} 条记录")
             return results
     except Exception as e:
         logger.error(f"❌ 获取用户提取码列表失败: {e}")
