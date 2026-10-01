@@ -80,8 +80,9 @@ def get_admin_keyboard():
     keyboard = [
         [KeyboardButton("📊 系统统计数据"), KeyboardButton("🗄️ 全局文件码库")],
         [KeyboardButton("📢 广播消息"), KeyboardButton("🚫 拉黑用户"), KeyboardButton("✅ 解封用户")],
-        [KeyboardButton("➕ 添加管理员"), KeyboardButton("🤖 克隆机器人管理")],
-        [KeyboardButton("↩️ 返回主菜单")]
+        [KeyboardButton("➕ 添加管理员"), KeyboardButton("📋 管理员名单与删除")],
+        [KeyboardButton("🤖 克隆机器人管理"), KeyboardButton("⚙️ 修改赞助链接")],
+        [KeyboardButton("🗑️ 一键清空所有码"), KeyboardButton("↩️ 返回主菜单")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -140,7 +141,7 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     if not context.args:
-        await update.message.reply_text("⚠️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
         return
         
     try:
@@ -207,7 +208,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.save_cloned_bot(new_token, user_id, bot_username)
         
         from bot import start_single_cloned_bot
-        asyncio.create_task(start_single_cloned_bot(new_token, context.application))
+        asyncio.create_task(start_single_cloned_bot(new_token))
         
         await update.message.reply_text(
             f"✅ **克隆机器人添加成功并已在后台启动！**\n\n"
@@ -236,6 +237,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
         return
 
+    if text == "📋 管理员名单与删除":
+        if not is_admin_user(user_id, role):
+            await update.message.reply_text("❌ 您没有权限执行此操作。")
+            return
+        
+        admins = db.get_all_admins()
+        msg_text = f"📋 **当前系统管理员名单 (共 {len(admins)} 人)：**\n\n"
+        keyboard = []
+        
+        for adm in admins:
+            adm_id = adm["user_id"]
+            created = str(adm["created_at"])[:19]
+            msg_text += f"• 用户 ID: `{adm_id}`\n  └ 添加时间: `{created}`\n\n"
+            if adm_id != SUPER_ADMIN_ID and adm_id != user_id:
+                keyboard.append([InlineKeyboardButton(f"🗑️ 移除管理员 {adm_id}", callback_data=f"remove_admin_{adm_id}")])
+                
+        if not keyboard:
+            msg_text += "*(暂无其他可移除的子管理员)*"
+            
+        await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
+
     if state == "awaiting_broadcast":
         context.user_data["admin_state"] = None
         await start_broadcast(update, context, text)
@@ -258,7 +281,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.unban_user(target_id)
             await update.message.reply_text(f"✅ 用户 `{target_id}` 已从黑名单移出！", parse_mode="Markdown")
         else:
-            await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
+            await update.message.reply_text("⚠️️ 输入无效，用户 ID 必须为纯数字。")
+        return
+
+    elif state == "awaiting_sponsor_url":
+        context.user_data["admin_state"] = None
+        new_url = text
+        db.set_setting("sponsor_url", new_url)
+        await update.message.reply_text(f"✅ **赞助链接已成功修改为：**\n`{new_url}`", parse_mode="Markdown")
+        return
+
+    if text == "⚙️ 修改赞助链接":
+        if not is_admin_user(user_id, role):
+            await update.message.reply_text("❌ 您没有权限执行此操作。")
+            return
+        context.user_data["admin_state"] = "awaiting_sponsor_url"
+        current_url = db.get_setting("sponsor_url", "https://t.me/ipq123")
+        await update.message.reply_text(
+            f"⚙️ **修改赞助链接引导**\n\n"
+            f"当前赞助链接为：`{current_url}`\n\n"
+            f"请直接回复发送你想要设置的**新网址/链接**：",
+            parse_mode="Markdown"
+        )
+        return
+
+    if text == "🗑️ 一键清空所有码":
+        if not is_admin_user(user_id, role):
+            await update.message.reply_text("❌ 您没有权限执行此操作。")
+            return
+        
+        confirm_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚠️ 确认清空所有提取码", callback_data="confirm_clear_all"),
+                InlineKeyboardButton("❌ 取消操作", callback_data="cancel_clear_all")
+            ]
+        ])
+        await update.message.reply_text(
+            "⚠️ **高危操作确认**\n\n你正在尝试**一键清空数据库中所有的提取码和文件记录**！\n此操作不可逆，确定要全部删除吗？",
+            reply_markup=confirm_keyboard,
+            parse_mode="Markdown"
+        )
         return
 
     if text == "📦 多文件打包模式":
@@ -336,10 +398,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif text == "☕️ 赞助机器人":
-        await update.message.reply_text("☕️ 感谢你的支持！联系管理员 @ipq123 进行赞助。")
+        sponsor_url = db.get_setting("sponsor_url", "https://t.me/ipq123")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 点击前往赞助页面", url=sponsor_url)]
+        ])
+        await update.message.reply_text(
+            "☕️ **感谢你的支持！**\n\n请点击下方按钮前往赞助页面：", 
+            reply_markup=keyboard, 
+            parse_mode="Markdown"
+        )
         return
 
-    elif text == "⚙️ 管理员功能":
+    elif text == "⚙️️ 管理员功能":
         if is_admin_user(user_id, role):
             await update.message.reply_text("⚙️ **已进入管理员后台面板**\n请选择你需要进行的操作：", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
         else:
@@ -500,7 +570,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"❌ 保存文件失败: {e}")
-            await status_msg.edit_text("⚠️ **检测到问题文件已被自动去除！** 未能生成提取码。")
+            await status_msg.edit_text("⚠️️ **检测到问题文件已被自动去除！** 未能生成提取码。")
 
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, broadcast_text: str):
     all_users = db.get_all_user_ids()
@@ -542,7 +612,7 @@ async def render_my_files_page(update, context, user_id, page=1, is_new_message=
         inline_keyboard.append([
             InlineKeyboardButton(f"📥 提取", callback_data=f"get_{code}"),
             InlineKeyboardButton(toggle_label, callback_data=f"toggle_{code}_{page}"),
-            InlineKeyboardButton(f"🗑️ 删除", callback_data=f"del_{code}_{page}")
+            InlineKeyboardButton(f"🗑️️ 删除", callback_data=f"del_{code}_{page}")
         ])
 
     nav_row = []
@@ -758,6 +828,33 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.delete_cloned_bot(token_to_del)
             await query.message.reply_text("✅ 已从数据库移除该克隆 Bot 配置。（重启服务器后将彻底停止运行）", parse_mode="Markdown")
             await query.answer()
+        return
+
+    if data.startswith("remove_admin_"):
+        if is_admin:
+            target_admin_id = int(data.replace("remove_admin_", ""))
+            db.demote_admin(target_admin_id)
+            await query.message.edit_text(f"✅ 已成功将用户 `{target_admin_id}` 移除管理员权限！", parse_mode="Markdown")
+            await query.answer()
+        else:
+            await query.answer("⛔ 权限不足", show_alert=True)
+        return
+
+    if data == "confirm_clear_all":
+        if is_admin:
+            success = db.clear_all_file_bundles()
+            if success:
+                await query.message.edit_text("✅ **成功：** 已彻底清空所有生成的提取码与文件记录！", parse_mode="Markdown")
+            else:
+                await query.message.edit_text("❌ **失败：** 数据库清理出错，请检查日志。", parse_mode="Markdown")
+            await query.answer()
+        else:
+            await query.answer("⛔ 权限不足", show_alert=True)
+        return
+
+    if data == "cancel_clear_all":
+        await query.message.edit_text("❌ 已取消清空操作。")
+        await query.answer()
         return
 
     if data.startswith("sendpage_") and not is_admin:

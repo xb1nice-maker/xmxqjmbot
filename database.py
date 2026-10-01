@@ -75,13 +75,19 @@ def init_db():
                 );
             """)
 
-            # 新增：克隆机器人表
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS cloned_bots (
                     token VARCHAR(100) PRIMARY KEY,
                     admin_id BIGINT,
                     bot_username VARCHAR(100),
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key VARCHAR(50) PRIMARY KEY,
+                    value TEXT
                 );
             """)
 
@@ -99,6 +105,35 @@ def init_db():
             logger.info("✅ 数据库表结构与索引初始化完成！")
     except Exception as e:
         logger.error(f"❌ 数据库初始化失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
+def get_setting(key: str, default: str = "") -> str:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM system_settings WHERE key = %s;", (key,))
+            row = cur.fetchone()
+            return row[0] if row else default
+    except Exception as e:
+        logger.error(f"获取系统配置失败: {e}")
+        return default
+    finally:
+        release_connection(conn)
+
+def set_setting(key: str, value: str):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO system_settings (key, value) 
+                VALUES (%s, %s) 
+                ON CONFLICT (key) DO UPDATE SET value = %s;
+            """, (key, value, value))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"保存系统配置失败: {e}")
         conn.rollback()
     finally:
         release_connection(conn)
@@ -139,6 +174,32 @@ def delete_cloned_bot(token: str):
             conn.commit()
     except Exception as e:
         logger.error(f"删除克隆机器人失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
+def get_all_admins():
+    """获取所有管理员用户列表"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, created_at FROM users WHERE role = 'admin' ORDER BY created_at DESC;")
+            return cur.fetchall()
+    except Exception as e:
+        logger.error(f"获取管理员列表失败: {e}")
+        return []
+    finally:
+        release_connection(conn)
+
+def demote_admin(user_id: int):
+    """将管理员降级为普通用户"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET role = 'user' WHERE user_id = %s;", (user_id,))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"降级管理员失败: {e}")
         conn.rollback()
     finally:
         release_connection(conn)
@@ -445,6 +506,21 @@ def delete_pack_by_code(code: str):
     except Exception as e:
         logger.error(f"删除提取码失败: {e}")
         conn.rollback()
+    finally:
+        release_connection(conn)
+
+def clear_all_file_bundles() -> bool:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM file_bundles;")
+            cur.execute("DELETE FROM user_extractions;")
+            conn.commit()
+            return True
+    except Exception as e:
+        logger.error(f"一键清空数据库失败: {e}")
+        conn.rollback()
+        return False
     finally:
         release_connection(conn)
 
