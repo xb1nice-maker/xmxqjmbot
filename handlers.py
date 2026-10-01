@@ -141,7 +141,7 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     if not context.args:
-        await update.message.reply_text("⚠️️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ 请指定要添加为管理员的用户 ID。\n用法：`/addadmin 目标用户ID`", parse_mode="Markdown")
         return
         
     try:
@@ -281,7 +281,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.unban_user(target_id)
             await update.message.reply_text(f"✅ 用户 `{target_id}` 已从黑名单移出！", parse_mode="Markdown")
         else:
-            await update.message.reply_text("⚠️️ 输入无效，用户 ID 必须为纯数字。")
+            await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
         return
 
     elif state == "awaiting_sponsor_url":
@@ -298,7 +298,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_state"] = "awaiting_sponsor_url"
         current_url = db.get_setting("sponsor_url", "https://t.me/ipq123")
         await update.message.reply_text(
-            f"⚙️ **修改赞助链接引导**\n\n"
+            f"⚙️️ **修改赞助链接引导**\n\n"
             f"当前赞助链接为：`{current_url}`\n\n"
             f"请直接回复发送你想要设置的**新网址/链接**：",
             parse_mode="Markdown"
@@ -342,7 +342,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text.startswith("🛡️ 防转发保护:"):
         if not context.user_data.get("packing_mode"):
-            await update.message.reply_text("⚠️ 当前未处于打包模式。")
+            await update.message.reply_text("⚠️️ 当前未处于打包模式。")
             return
         current_protect = context.user_data.get("pack_protect", False)
         new_protect = not current_protect
@@ -409,7 +409,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    elif text == "⚙️️ 管理员功能":
+    elif text in ["⚙️ 管理员功能", "⚙ 管理员功能"]:
         if is_admin_user(user_id, role):
             await update.message.reply_text("⚙️ **已进入管理员后台面板**\n请选择你需要进行的操作：", reply_markup=get_admin_keyboard(), parse_mode="Markdown")
         else:
@@ -469,7 +469,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"📦 **成功识别提取码**：`{text}`\n"
                 f"📦 **包含文件**：`{pack['count']}` 个\n"
-                f"🛡️ **防转发状态**：`{protect_label}`\n"
+                f"🛡️️ **防转发状态**：`{protect_label}`\n"
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
@@ -612,7 +612,7 @@ async def render_my_files_page(update, context, user_id, page=1, is_new_message=
         inline_keyboard.append([
             InlineKeyboardButton(f"📥 提取", callback_data=f"get_{code}"),
             InlineKeyboardButton(toggle_label, callback_data=f"toggle_{code}_{page}"),
-            InlineKeyboardButton(f"🗑️️ 删除", callback_data=f"del_{code}_{page}")
+            InlineKeyboardButton(f"🗑️ 删除", callback_data=f"del_{code}_{page}")
         ])
 
     nav_row = []
@@ -752,7 +752,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                             elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id, protect_content=protect_content)
                             else: await context.bot.send_document(chat_id=chat_id, document=f_id, protect_content=protect_content)
                         except Exception as item_err:
-                            logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
+                            logger.warning(f"⚠️️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
                             failed_count += 1
     except Exception as e:
         logger.error(f"❌ 提取推送批次主逻辑异常: {e}")
