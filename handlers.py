@@ -342,7 +342,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text.startswith("🛡️ 防转发保护:"):
         if not context.user_data.get("packing_mode"):
-            await update.message.reply_text("⚠️️ 当前未处于打包模式。")
+            await update.message.reply_text("⚠️ 当前未处于打包模式。")
             return
         current_protect = context.user_data.get("pack_protect", False)
         new_protect = not current_protect
@@ -469,7 +469,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"📦 **成功识别提取码**：`{text}`\n"
                 f"📦 **包含文件**：`{pack['count']}` 个\n"
-                f"🛡️️ **防转发状态**：`{protect_label}`\n"
+                f"🛡️ **防转发状态**：`{protect_label}`\n"
                 f"🚀 正在为您推送资源，请稍候...", 
                 parse_mode="Markdown"
             )
@@ -529,6 +529,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_item = {"type": file_type, "file_id": file_id}
 
+    # 无论是主 Bot 还是克隆 Bot，这里都统一检查 packing_mode 状态
     if context.user_data.get("packing_mode"):
         if "pack_files" not in context.user_data:
             context.user_data["pack_files"] = []
@@ -570,7 +571,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"❌ 保存文件失败: {e}")
-            await status_msg.edit_text("⚠️️ **检测到问题文件已被自动去除！** 未能生成提取码。")
+            await status_msg.edit_text("⚠️ **检测到问题文件已被自动去除！** 未能生成提取码。")
 
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, broadcast_text: str):
     all_users = db.get_all_user_ids()
@@ -752,7 +753,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                             elif f_type == "voice": await context.bot.send_voice(chat_id=chat_id, voice=f_id, protect_content=protect_content)
                             else: await context.bot.send_document(chat_id=chat_id, document=f_id, protect_content=protect_content)
                         except Exception as item_err:
-                            logger.warning(f"⚠️️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
+                            logger.warning(f"⚠️ 忽略失效文件继续发送 [{f_id}]: {item_err}")
                             failed_count += 1
     except Exception as e:
         logger.error(f"❌ 提取推送批次主逻辑异常: {e}")
@@ -787,7 +788,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     protect_label = "🔒 开启" if protect_content else "🔓 关闭"
     status_msg = (
         f"📦 **提取码：** `{code}`\n"
-        f"🛡️ **防转发保护：** `{protect_label}`\n"
+        f"🛡️️ **防转发保护：** `{protect_label}`\n"
         f"📊 **当前组进度：** 第 `{page}/{total_pages}` 页 (每组10个)\n"
         f"📁 **本次推送：** 第 {start_idx + 1} ~ {end_idx} 个文件（共 {total_files} 个）"
         f"{warning_suffix}"
