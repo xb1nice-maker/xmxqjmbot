@@ -173,24 +173,59 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("admin_state")
 
-    if text == "🤖 克隆机器人管理":
+    # 统一处理 Emoji 变体选择符和空白，避免按钮文字看起来相同但字符串不完全相同。
+    normalized_text = text.replace("\ufe0f", "").strip()
+    normalized_clone_menu = "🤖 克隆机器人管理".replace("\ufe0f", "")
+
+    if normalized_text == normalized_clone_menu:
+        logger.info(
+            "收到克隆机器人管理菜单请求：user_id=%s, role=%s",
+            user_id, role
+        )
+
         if not is_admin_user(user_id, role):
             await update.message.reply_text("❌ 您没有权限执行此操作。")
             return
-        
-        cloned_list = db.get_all_cloned_bots()
-        text_content = f"🤖 **克隆机器人管理后台**\n\n当前已成功克隆并运行的 Bot 数量：`{len(cloned_list)}` 个\n\n"
-        
-        keyboard = []
-        for item in cloned_list:
-            t = item["token"]
-            uname = item["bot_username"] or "未知"
-            mask_token = t[:6] + "..." + t[-4:]
-            text_content += f"• @{uname} (`{mask_token}`)\n"
-            keyboard.append([InlineKeyboardButton(f"🗑️ 删除克隆 @{uname}", callback_data=f"clone_del_{t}")])
-            
-        keyboard.append([InlineKeyboardButton("➕ 添加新克隆 Bot", callback_data="clone_add_start")])
-        await update.message.reply_text(text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+        try:
+            cloned_list = db.get_all_cloned_bots()
+            text_content = (
+                "🤖 克隆机器人管理后台\n\n"
+                f"当前已登记的 Bot 数量：{len(cloned_list)} 个\n\n"
+            )
+
+            keyboard = []
+            for item in cloned_list:
+                token = item["token"]
+                username = item["bot_username"] or "未知"
+                masked_token = token[:6] + "..." + token[-4:]
+                text_content += f"• @{username} ({masked_token})\n"
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🗑️ 删除克隆 @{username}",
+                        callback_data=f"clone_del_{token}"
+                    )
+                ])
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    "➕ 添加新克隆 Bot",
+                    callback_data="clone_add_start"
+                )
+            ])
+
+            await update.message.reply_text(
+                text_content,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            logger.exception(
+                "克隆机器人管理页面加载失败：user_id=%s",
+                user_id
+            )
+            await update.message.reply_text(
+                "⚠️ 克隆管理页面加载失败，请检查 Render 日志中的详细错误。"
+            )
         return
 
     if state == "awaiting_clone_token":
