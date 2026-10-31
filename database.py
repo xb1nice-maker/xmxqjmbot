@@ -91,6 +91,19 @@ def init_db():
                 );
             """)
 
+            # 保存通过防失联群验证的用户；到期后重新向 Telegram 核实。
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS membership_verifications (
+                    user_id BIGINT PRIMARY KEY,
+                    verified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMPTZ NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_membership_verifications_expires_at
+                ON membership_verifications(expires_at);
+            """)
+
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_file_bundles_user_id 
                 ON file_bundles(user_id);
@@ -248,6 +261,41 @@ def update_user_code_extraction(user_id: int, code: str):
             conn.commit()
     except Exception as e:
         logger.error(f"更新用户提取时间失败: {e}")
+        conn.rollback()
+    finally:
+        release_connection(conn)
+
+def is_membership_verified(user_id: int) -> bool:
+    """检查用户是否有尚未过期的防失联群验证记录。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM membership_verifications WHERE user_id = %s AND expires_at > CURRENT_TIMESTAMP;",
+                (int(user_id),)
+            )
+            return cur.fetchone() is not None
+    except Exception as e:
+        logger.error("读取群验证记录失败 [User: %s]: %s", user_id, e)
+        return False
+    finally:
+        release_connection(conn)
+
+def save_membership_verification(user_id: int, days: int = 7):
+    """保存成功的群验证，默认有效 7 天。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO membership_verifications (user_id, verified_at, expires_at)
+                VALUES (%s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + (%s * INTERVAL '1 day'))
+                ON CONFLICT (user_id) DO UPDATE SET
+                    verified_at = CURRENT_TIMESTAMP,
+                    expires_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 day');
+            """, (int(user_id), int(days), int(days)))
+            conn.commit()
+    except Exception as e:
+        logger.error("保存群验证记录失败 [User: %s]: %s", user_id, e)
         conn.rollback()
     finally:
         release_connection(conn)

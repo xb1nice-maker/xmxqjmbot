@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 SUPER_ADMIN_ID = 8762272568
 
-# 只缓存已确认在防失联群内的用户；45 秒后重新向 Telegram 核实。
-_MEMBERSHIP_CACHE_TTL = 45.0
+# 成功验证后保存 7 天；同时使用进程内缓存，避免每次操作都查询数据库。
+_MEMBERSHIP_CACHE_TTL = 7 * 24 * 60 * 60.0
 _membership_cache = {}
 
 def is_admin_user(user_id: int, role: str) -> bool:
@@ -42,12 +42,22 @@ async def check_user_membership(
     if _membership_cache.get(user_id, 0.0) > now:
         return True
     _membership_cache.pop(user_id, None)
+
+    # 进程重启后从数据库恢复有效验证记录；有效期内不再请求 Telegram 群成员接口。
+    has_saved_verification = await asyncio.to_thread(
+        db.is_membership_verified, user_id
+    )
+    if has_saved_verification:
+        _membership_cache[user_id] = now + _MEMBERSHIP_CACHE_TTL
+        return True
+
     try:
         member = await context.bot.get_chat_member(
             chat_id=REQUIRED_GROUP_ID, user_id=user_id
         )
         if member.status in ("creator", "administrator", "member"):
             _membership_cache[user_id] = now + _MEMBERSHIP_CACHE_TTL
+            await asyncio.to_thread(db.save_membership_verification, user_id, 7)
             return True
     except Exception as e:
         logger.error("防失联群成员验证失败 [User: %s]: %s", user_id, e)
