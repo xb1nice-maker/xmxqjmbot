@@ -358,7 +358,7 @@ def set_user_role(user_id: int, role: str):
         release_connection(conn)
 
 def save_user_pack(user_id: int, files: list, protect_content: bool = False) -> str:
-    init_db()
+    # 数据表已在程序启动时初始化；生成提取码时不重复执行 DDL。
     conn = get_connection()
     try:
         clean_user_id = int(user_id)

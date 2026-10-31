@@ -16,47 +16,61 @@ import database as db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SUPER_ADMIN_ID = 8762272568  
+SUPER_ADMIN_ID = 8762272568
+
+# 只缓存已确认在防失联群内的用户；45 秒后重新向 Telegram 核实。
+_MEMBERSHIP_CACHE_TTL = 45.0
+_membership_cache = {}
 
 def is_admin_user(user_id: int, role: str) -> bool:
     return (user_id == SUPER_ADMIN_ID) or (user_id == ADMIN_ID) or (role in [ROLE_SUPER_ADMIN, ROLE_ADMIN])
 
-async def check_user_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def check_user_membership(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, role: str = None
+) -> bool:
+    """保留防失联群验证；仅短暂缓存成功结果，过期后重新核实。"""
     user = update.effective_user
     if not user:
         return False
-    
     user_id = user.id
-    role = get_user_role(user_id)
-    
+    if role is None:
+        role = await asyncio.to_thread(get_user_role, user_id)
     if is_admin_user(user_id, role):
         return True
 
+    now = time.monotonic()
+    if _membership_cache.get(user_id, 0.0) > now:
+        return True
+    _membership_cache.pop(user_id, None)
     try:
-        member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
-        if member.status in ["creator", "administrator", "member"]:
+        member = await context.bot.get_chat_member(
+            chat_id=REQUIRED_GROUP_ID, user_id=user_id
+        )
+        if member.status in ("creator", "administrator", "member"):
+            _membership_cache[user_id] = now + _MEMBERSHIP_CACHE_TTL
             return True
     except Exception as e:
-        logger.error(f"⚠️ 检查群状态异常 [User: {user_id}]: {e}")
+        logger.error("防失联群成员验证失败 [User: %s]: %s", user_id, e)
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 联系客服/管理购买 VIP", url="https://t.me/ipq123")]
     ])
-    
     msg_text = (
         "🚫 **访问受限！**\n\n"
         "检测到你尚未加入 **VIP 防失联群组**，禁止使用本机器人。\n\n"
         "⚠️ 本机器人仅限 VIP 会员使用，请联系客服/管理开通购买 VIP 权限后再试！"
     )
-
     try:
         if update.callback_query:
-            await update.callback_query.message.reply_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+            await update.callback_query.message.reply_text(
+                msg_text, reply_markup=keyboard, parse_mode="Markdown"
+            )
         elif update.message:
-            await update.message.reply_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+            await update.message.reply_text(
+                msg_text, reply_markup=keyboard, parse_mode="Markdown"
+            )
     except Exception as e:
-        logger.error(f"发送未加群拦截消息失败: {e}")
-        
+        logger.error("发送未加群拦截消息失败: %s", e)
     return False
 
 def get_main_keyboard(user_role: str, user_id: int = 0):
@@ -94,20 +108,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
     user_id = user.id
-    role = get_user_role(user_id)
+    role = await asyncio.to_thread(get_user_role, user_id)
 
     if role == ROLE_BLACKLIST:
         await update.message.reply_text("🚫 你已被列入黑名单，无法使用机器人。")
         return
 
-    if not await check_user_membership(update, context):
+    if not await check_user_membership(update, context, role):
         return
 
     context.user_data["packing_mode"] = False
     context.user_data["pack_files"] = []
     context.user_data["pack_protect"] = False  
     context.user_data["packing_progress_msg_id"] = None
-    db.add_user_if_not_exists(user_id)
+    await asyncio.to_thread(db.add_user_if_not_exists, user_id)
 
     welcome_text = (
         "👋 **欢迎使用小马星球专属解码机器人！**\n"
@@ -134,7 +148,7 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     user_id = update.effective_user.id
-    current_role = get_user_role(user_id)
+    current_role = await asyncio.to_thread(get_user_role, user_id)
     
     if not is_admin_user(user_id, current_role):
         await update.message.reply_text("❌ 您没有权限执行此操作。")
@@ -146,7 +160,7 @@ async def cmd_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     try:
         target_user_id = int(context.args[0])
-        db.set_user_role(target_user_id, 'admin')
+        await asyncio.to_thread(db.set_user_role, target_user_id, 'admin')
         await update.message.reply_text(f"✅ 成功将用户 `{target_user_id}` 提升为**管理员**！", parse_mode="Markdown")
     except ValueError:
         await update.message.reply_text("❌ 用户 ID 格式不正确，必须是纯数字。")
@@ -159,17 +173,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
     user_id = user.id
-    role = get_user_role(user_id)
+    role = await asyncio.to_thread(get_user_role, user_id)
 
     if role == ROLE_BLACKLIST:
         await update.message.reply_text("🚫 你已被列入黑名单，无法使用机器人功能。")
         return
 
-    if not await check_user_membership(update, context):
+    if not await check_user_membership(update, context, role):
         return
 
     text = update.message.text.strip()
-    db.add_user_if_not_exists(user_id)
+    await asyncio.to_thread(db.add_user_if_not_exists, user_id)
 
     state = context.user_data.get("admin_state")
 
@@ -188,7 +202,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            cloned_list = db.get_all_cloned_bots()
+            cloned_list = await asyncio.to_thread(db.get_all_cloned_bots)
             text_content = (
                 "🤖 克隆机器人管理后台\n\n"
                 f"当前已登记的 Bot 数量：{len(cloned_list)} 个\n\n"
@@ -240,7 +254,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ **Token 无效或无法连接 Telegram API**\n错误原因: `{e}`", parse_mode="Markdown")
             return
             
-        db.save_cloned_bot(new_token, user_id, bot_username)
+        await asyncio.to_thread(db.save_cloned_bot, new_token, user_id, bot_username)
         
         from bot import start_single_cloned_bot
         asyncio.create_task(start_single_cloned_bot(new_token))
@@ -248,7 +262,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ **克隆机器人添加成功并已在后台启动！**\n\n"
             f"• 机器人用户名：@{bot_username}\n"
-            f"• Token：`{new_token}`\n\n"
+            "• Token：已安全保存（不在聊天中显示）\n\n"
             f"现在用户可以直接给 @{bot_username} 发送提取码或文件了！",
             parse_mode="Markdown"
         )
@@ -266,7 +280,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_state"] = None
         if text.isdigit():
             target_id = int(text)
-            db.set_user_role(target_id, 'admin')
+            await asyncio.to_thread(db.set_user_role, target_id, 'admin')
             await update.message.reply_text(f"✅ 成功将用户 `{target_id}` 提升为**管理员**！", parse_mode="Markdown")
         else:
             await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
@@ -277,7 +291,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 您没有权限执行此操作。")
             return
         
-        admins = db.get_all_admins()
+        admins = await asyncio.to_thread(db.get_all_admins)
         msg_text = f"📋 **当前系统管理员名单 (共 {len(admins)} 人)：**\n\n"
         keyboard = []
         
@@ -303,7 +317,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_state"] = None
         if text.isdigit():
             target_id = int(text)
-            db.ban_user(target_id)
+            await asyncio.to_thread(db.ban_user, target_id)
             await update.message.reply_text(f"🚫 用户 `{target_id}` 已成功加入黑名单！", parse_mode="Markdown")
         else:
             await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
@@ -313,7 +327,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_state"] = None
         if text.isdigit():
             target_id = int(text)
-            db.unban_user(target_id)
+            await asyncio.to_thread(db.unban_user, target_id)
             await update.message.reply_text(f"✅ 用户 `{target_id}` 已从黑名单移出！", parse_mode="Markdown")
         else:
             await update.message.reply_text("⚠️ 输入无效，用户 ID 必须为纯数字。")
@@ -322,7 +336,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == "awaiting_sponsor_url":
         context.user_data["admin_state"] = None
         new_url = text
-        db.set_setting("sponsor_url", new_url)
+        await asyncio.to_thread(db.set_setting, "sponsor_url", new_url)
         await update.message.reply_text(f"✅ **赞助链接已成功修改为：**\n`{new_url}`", parse_mode="Markdown")
         return
 
@@ -331,7 +345,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 您没有权限执行此操作。")
             return
         context.user_data["admin_state"] = "awaiting_sponsor_url"
-        current_url = db.get_setting("sponsor_url", "https://t.me/ipq123")
+        current_url = await asyncio.to_thread(db.get_setting, "sponsor_url", "https://t.me/ipq123")
         await update.message.reply_text(
             f"⚙️️ **修改赞助链接引导**\n\n"
             f"当前赞助链接为：`{current_url}`\n\n"
@@ -402,7 +416,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         protect_status = context.user_data.get("pack_protect", False)
-        code = db.save_user_pack(user_id, files, protect_content=protect_status)
+        code = await asyncio.to_thread(db.save_user_pack, user_id, files, protect_content=protect_status)
         context.user_data["packing_mode"] = False
         context.user_data["pack_files"] = []
         context.user_data["pack_protect"] = False
@@ -433,7 +447,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif text == "☕️ 赞助机器人":
-        sponsor_url = db.get_setting("sponsor_url", "https://t.me/ipq123")
+        sponsor_url = await asyncio.to_thread(db.get_setting, "sponsor_url", "https://t.me/ipq123")
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 点击前往赞助页面", url=sponsor_url)]
         ])
@@ -456,7 +470,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     elif text in ["📊 系统统计数据", "👥 查看用户数量"] and is_admin_user(user_id, role):
-        stats = db.get_system_stats()
+        stats = await asyncio.to_thread(db.get_system_stats)
         await update.message.reply_text(
             f"📊 **系统数据统计**\n\n"
             f"• 历史注册用户数：`{stats['total_users']}` 人\n"
@@ -486,10 +500,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     else:
-        pack = db.get_pack_by_code(text)
+        pack = await asyncio.to_thread(db.get_pack_by_code, text)
         if pack:
             if not is_admin_user(user_id, role):
-                is_cd, remaining_sec = db.check_user_code_cooldown(user_id, text, hours=2)
+                is_cd, remaining_sec = await asyncio.to_thread(db.check_user_code_cooldown, user_id, text, hours=2)
                 if is_cd:
                     mins = math.ceil(remaining_sec / 60)
                     await update.message.reply_text(
@@ -520,16 +534,16 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
     user_id = user.id
-    role = get_user_role(user_id)
+    role = await asyncio.to_thread(get_user_role, user_id)
 
-    if role == ROLE_BLACKLIST or not await check_user_membership(update, context):
+    if role == ROLE_BLACKLIST or not await check_user_membership(update, context, role):
         return
 
     if not is_admin_user(user_id, role):
         await update.message.reply_text("❌ 抱歉，本机器人**仅限管理员**上传文件包。\n\n普通用户只能通过输入提取码来下载文件哦！")
         return
 
-    db.add_user_if_not_exists(user_id)
+    await asyncio.to_thread(db.add_user_if_not_exists, user_id)
     msg = update.message
     
     file_type = "document"
@@ -597,7 +611,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         status_msg = await msg.reply_text("⏳ **正在处理并生成提取码...**", parse_mode="Markdown")
         try:
-            code = db.save_user_pack(user_id, [file_item], protect_content=False)
+            code = await asyncio.to_thread(db.save_user_pack, user_id, [file_item], protect_content=False)
             await status_msg.edit_text(
                 f"✅ **文件转存成功！**\n\n"
                 f"🎉 你的表情提取码为：\n`{code}`\n\n"
@@ -609,7 +623,7 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ **检测到问题文件已被自动去除！** 未能生成提取码。")
 
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, broadcast_text: str):
-    all_users = db.get_all_user_ids()
+    all_users = await asyncio.to_thread(db.get_all_user_ids)
     await update.message.reply_text(f"⏳ 开始向 `{len(all_users)}` 名用户推送广播...", parse_mode="Markdown")
     success, failed = 0, 0
     for uid in all_users:
@@ -622,7 +636,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, br
     await update.message.reply_text(f"✅ 广播完毕！成功: `{success}`, 失败: `{failed}`", parse_mode="Markdown")
 
 async def render_my_files_page(update, context, user_id, page=1, is_new_message=False):
-    packs = db.get_user_packs(user_id)
+    packs = await asyncio.to_thread(db.get_user_packs, user_id)
     if not packs:
         text = "📂 你当前还没有上传过任何文件。"
         if is_new_message: await update.message.reply_text(text)
@@ -661,7 +675,7 @@ async def render_my_files_page(update, context, user_id, page=1, is_new_message=
     else: await update.callback_query.edit_message_text(msg_text, reply_markup=markup, parse_mode="Markdown")
 
 async def render_admin_global_packs_page(update, context, page=1, is_new_message=False):
-    all_packs = db.get_all_global_packs()
+    all_packs = await asyncio.to_thread(db.get_all_global_packs)
     if not all_packs:
         text = "🗄️ 全局文件码库为空。"
         if is_new_message: await update.message.reply_text(text)
@@ -702,7 +716,7 @@ async def render_admin_global_packs_page(update, context, page=1, is_new_message
 
 async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, page: int = 1, user_id: int = None, screen_group: int = None):
     chat_id = update.effective_chat.id
-    pack = db.get_pack_by_code(code)
+    pack = await asyncio.to_thread(db.get_pack_by_code, code)
 
     if not pack:
         text = "❌ 提取码已失效或被删除。"
@@ -733,7 +747,7 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     chunk = file_items[start_idx:end_idx]
 
     if page == 1 and user_id and not update.callback_query:
-        db.update_user_code_extraction(user_id, code)
+        await asyncio.to_thread(db.update_user_code_extraction, user_id, code)
 
     if update.callback_query:
         waiting_msg = await context.bot.send_message(
@@ -833,17 +847,28 @@ async def send_batch_files(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query is None:
+        return
+
+    # Telegram 要求尽快确认按钮点击；必须放在数据库和群成员网络检查之前。
+    # 每个 callback 只 answer 一次，避免 Query is too old / response timeout。
+    try:
+        await query.answer()
+    except Exception as answer_error:
+        logger.debug("Callback answer ignored: %s", answer_error)
+
     user = update.effective_user
     if not user:
-        await query.answer()
         return
     user_id = user.id
 
-    if not await check_user_membership(update, context):
-        await query.answer()
+    role = await asyncio.to_thread(get_user_role, user_id)
+    if role == ROLE_BLACKLIST:
+        await query.message.reply_text("🚫 你已被列入黑名单，无法使用机器人功能。")
+        return
+    if not await check_user_membership(update, context, role):
         return
 
-    role = get_user_role(user_id)
     data = query.data
     is_admin = is_admin_user(user_id, role)
 
@@ -855,42 +880,37 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "请把你在 @BotFather 那里新申请到的 **Bot Token** 直接发送给我：",
                 parse_mode="Markdown"
             )
-            await query.answer()
         return
 
     if data.startswith("clone_del_"):
         if is_admin:
             token_to_del = data.replace("clone_del_", "")
-            db.delete_cloned_bot(token_to_del)
+            await asyncio.to_thread(db.delete_cloned_bot, token_to_del)
             await query.message.reply_text("✅ 已从数据库移除该克隆 Bot 配置。（重启服务器后将彻底停止运行）", parse_mode="Markdown")
-            await query.answer()
         return
 
     if data.startswith("remove_admin_"):
         if is_admin:
             target_admin_id = int(data.replace("remove_admin_", ""))
-            db.demote_admin(target_admin_id)
+            await asyncio.to_thread(db.demote_admin, target_admin_id)
             await query.message.edit_text(f"✅ 已成功将用户 `{target_admin_id}` 移除管理员权限！", parse_mode="Markdown")
-            await query.answer()
         else:
-            await query.answer("⛔ 权限不足", show_alert=True)
+            await query.message.reply_text("⛔ 权限不足")
         return
 
     if data == "confirm_clear_all":
         if is_admin:
-            success = db.clear_all_file_bundles()
+            success = await asyncio.to_thread(db.clear_all_file_bundles)
             if success:
                 await query.message.edit_text("✅ **成功：** 已彻底清空所有生成的提取码与文件记录！", parse_mode="Markdown")
             else:
                 await query.message.edit_text("❌ **失败：** 数据库清理出错，请检查日志。", parse_mode="Markdown")
-            await query.answer()
         else:
-            await query.answer("⛔ 权限不足", show_alert=True)
+            await query.message.reply_text("⛔ 权限不足")
         return
 
     if data == "cancel_clear_all":
         await query.message.edit_text("❌ 已取消清空操作。")
-        await query.answer()
         return
 
     if data.startswith("sendpage_") and not is_admin:
@@ -899,11 +919,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cooldown = 10
         if now - last_click < cooldown:
             remaining = int(cooldown - (now - last_click))
-            await query.answer(f"⏳ 正在接收或冷却中，请等待 {remaining} 秒后再点击！", show_alert=True)
+            await query.message.reply_text(f"⏳ 正在接收或冷却中，请等待 {remaining} 秒后再点击！")
             return
         context.user_data["last_page_click_time"] = now
 
-    await query.answer()
 
     if data.startswith("page_"):
         await render_my_files_page(update, context, user_id=user_id, page=int(data.split("_")[1]))
@@ -913,40 +932,40 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("del_"):
         _, code, current_page = data.split("_")
-        db.delete_pack_by_code(code)
+        await asyncio.to_thread(db.delete_pack_by_code, code)
         await query.message.reply_text(f"✅ 提取码 `{code}` 已成功删除！", parse_mode="Markdown")
         await render_my_files_page(update, context, user_id=user_id, page=int(current_page))
 
     elif data.startswith("adm_del_"):
         if is_admin:
             _, _, code, current_page = data.split("_")
-            db.delete_pack_by_code(code)
+            await asyncio.to_thread(db.delete_pack_by_code, code)
             await query.message.reply_text(f"👑 **管理员删码：** 提取码 `{code}` 已强行清空！", parse_mode="Markdown")
             await render_admin_global_packs_page(update, context, page=int(current_page))
 
     elif data.startswith("toggle_"):
         _, code, current_page = data.split("_")
-        pack = db.get_pack_by_code(code)
+        pack = await asyncio.to_thread(db.get_pack_by_code, code)
         if pack:
             new_status = not pack.get("protect_content", False)
-            db.update_pack_protect_status(code, new_status)
+            await asyncio.to_thread(db.update_pack_protect_status, code, new_status)
             await query.message.reply_text(f"✅ 提取码 `{code}` 的防转发保护已更新为：`{'开启' if new_status else '关闭'}`", parse_mode="Markdown")
         await render_my_files_page(update, context, user_id=user_id, page=int(current_page))
 
     elif data.startswith("adm_toggle_"):
         if is_admin:
             _, _, code, current_page = data.split("_")
-            pack = db.get_pack_by_code(code)
+            pack = await asyncio.to_thread(db.get_pack_by_code, code)
             if pack:
                 new_status = not pack.get("protect_content", False)
-                db.update_pack_protect_status(code, new_status)
+                await asyncio.to_thread(db.update_pack_protect_status, code, new_status)
                 await query.message.reply_text(f"👑 **管理员操作**：提取码 `{code}` 的防转发保护已更新为：`{'开启' if new_status else '关闭'}`", parse_mode="Markdown")
             await render_admin_global_packs_page(update, context, page=int(current_page))
 
     elif data.startswith("get_"):
         code = data.split("_")[1]
         if not is_admin:
-            is_cd, remaining_sec = db.check_user_code_cooldown(user_id, code, hours=2)
+            is_cd, remaining_sec = await asyncio.to_thread(db.check_user_code_cooldown, user_id, code, hours=2)
             if is_cd:
                 mins = math.ceil(remaining_sec / 60)
                 await query.message.reply_text(f"⏳ **提取码冷却中**\n\n该提取码 `{code}` 在 2 小时内已被提取过！\n请等待 **{mins} 分钟** 后再试。", parse_mode="Markdown")
@@ -955,17 +974,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("sendpage_"):
         _, code, page_str, screen_group_str = data.split("_")
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        # 不提前移除分页键盘：即使发送失败，用户仍可继续操作。
         await send_batch_files(update, context, code=code, page=int(page_str), user_id=user_id, screen_group=int(screen_group_str))
 
     elif data.startswith("block_"):
         _, code, screen_group_str = data.split("_")
         screen_group = int(screen_group_str)
         
-        pack = db.get_pack_by_code(code)
+        pack = await asyncio.to_thread(db.get_pack_by_code, code)
         if not pack:
             await query.message.edit_text("❌ 提取码已失效或被删除。")
             return

@@ -6,6 +6,7 @@ from telegram.ext import (
     CallbackQueryHandler, filters
 )
 from telegram import Update
+from telegram.request import HTTPXRequest
 from aiohttp import web
 from config import BOT_TOKEN
 from database import init_db, get_all_cloned_bots
@@ -25,6 +26,20 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 # 全局存储所有克隆机器人的应用实例，方便管理和随时删除
 active_cloned_apps = {}
 
+
+def build_bot_application(token: str):
+    """主机器人与克隆机器人共用明确配置的 HTTP 连接池。"""
+    request = HTTPXRequest(
+        connection_pool_size=30, connect_timeout=15.0, read_timeout=30.0,
+        write_timeout=30.0, pool_timeout=15.0
+    )
+    updates_request = HTTPXRequest(
+        connection_pool_size=10, connect_timeout=15.0, read_timeout=45.0,
+        write_timeout=30.0, pool_timeout=15.0
+    )
+    return (ApplicationBuilder().token(token).request(request)
+            .get_updates_request(updates_request).build())
+
 async def health_check(request):
     """给 UptimeRobot 用的存活监测接口"""
     return web.Response(text="Bot is running!")
@@ -34,7 +49,7 @@ async def start_single_cloned_bot(token: str):
     if token in active_cloned_apps:
         return True
     try:
-        clone_app = ApplicationBuilder().token(token).build()
+        clone_app = build_bot_application(token)
         
         clone_app.add_handler(CommandHandler("start", cmd_start))
         clone_app.add_handler(CommandHandler("addadmin", cmd_add_admin))
@@ -81,7 +96,7 @@ async def stop_single_cloned_bot(token: str):
 
 async def sync_cloned_bots():
     """从数据库同步并启动所有克隆机器人"""
-    cloned_bots = get_all_cloned_bots()
+    cloned_bots = await asyncio.to_thread(get_all_cloned_bots)
     current_tokens = {item["token"] for item in cloned_bots}
     
     # 启动数据库中存在但内存中没有的
@@ -106,7 +121,7 @@ def main():
         return
 
     print("2. 正在构建主 Telegram 机器人应用...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = build_bot_application(BOT_TOKEN)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("addadmin", cmd_add_admin))
